@@ -1,0 +1,1654 @@
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+from math import gcd, floor, ceil
+from functools import reduce
+from scipy.stats import skew, median_abs_deviation, kurtosis, johnsonsu
+
+# 設定中文字體
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
+class CLTightenCalculator:
+    """Control Limit Tighten Calculator - 管制線收緊計算器"""
+    
+    def __init__(self, chart_info_path=None, raw_data_dir=None):
+        """
+        初始化 CL Tighten Calculator
+        
+        Args:
+            chart_info_path: Chart 資訊檔案路徑
+            raw_data_dir: 原始數據目錄路徑
+        """
+        self.chart_info_path = chart_info_path
+        self.raw_data_dir = raw_data_dir
+        self.results = []
+        
+    # === Utility Functions ===
+    
+    def compute_resolution(self, values):
+        """SOP 1.3: 估計資料解析度 (Resolution)"""
+        if len(values) < 2: 
+            return None
+        sorted_vals = sorted(set(values))
+        if len(sorted_vals) < 2: 
+            return None
+        
+        diffs = [j - i for i, j in zip(sorted_vals[:-1], sorted_vals[1:])]
+        non_zero_diffs = [d for d in diffs if d != 0]
+        if not non_zero_diffs: 
+            return None
+        
+        # 放大避免浮點數誤差，然後計算最大公約數
+        scaled_diffs = [int(round(d * 10000)) for d in non_zero_diffs]
+        # 使用 reduce(gcd, ...) 處理列表
+        res_scaled = reduce(gcd, scaled_diffs)
+        return res_scaled / 10000
+
+    def robust_zscore_sop2(self, values):
+        """SOP 2.4/4.2: 計算 Robust Z-score (zi)"""
+        med = np.median(values)
+        sd = np.std(values)
+        if sd == 0: 
+            return np.zeros(len(values))
+            
+        mad = median_abs_deviation(values) 
+        
+        if mad == 0:
+            mean_dev = np.mean(np.abs(values - med))
+            if mean_dev == 0: 
+                return np.zeros(len(values))
+            z = 0.7979 * np.abs(values - med) / mean_dev
+        else:
+            z = 0.6745 * np.abs(values - med) / mad
+        return z
+
+    def compute_CB(self, values):
+        """標準 Bimodality Coefficient (BC)"""
+        N = len(values)
+        if N < 4: 
+            return 0 
+        sk = skew(values, bias=False)
+        ku = kurtosis(values, fisher=True) + 3 
+        if ku <= 0: 
+            return 0 
+        return (sk**2 + 1) / ku
+
+    def compute_robust_sigma(self, values):
+        """SOP 4.1: 依資料筆數計算 UR/LR (Robust Sigma)"""
+        N = len(values)
+        P = np.percentile
+        median_val = np.median(values)
+        
+        if N < 4: 
+            return np.std(values), np.std(values)
+            
+        # SOP 4.1 Robust Sigma 估計邏輯
+        if N >= 10000:
+            UR = (P(values, 99.5) - median_val)/3.09
+            LR = (median_val - P(values, 0.1))/3.09
+        elif 3000 <= N < 10000:
+            UR = (P(values, 99.5) - median_val)/2.576
+            LR = (median_val - P(values, 0.5))/2.576
+        elif 300 <= N < 3000:
+            UR = (P(values, 95) - median_val)/2.326
+            LR = (median_val - P(values, 1))/2.326
+        elif 100 <= N < 300:
+            UR = (P(values, 97) - median_val)/1.881
+            LR = (median_val - P(values, 3))/1.881
+        else: 
+            UR = (P(values, 95) - median_val)/1.645
+            LR = (median_val - P(values, 5))/1.645
+            
+        # 確保不會返回負值
+        return max(0, UR), max(0, LR)
+
+    # === SOP 1: Data Integrity ===
+
+    def data_integrity(self, df, date_col, value_col, oos_col):
+        """SOP 1.1 & 1.2: 篩選最近2年有效資料並排除 OOS"""
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        cutoff = pd.Timestamp.today() - pd.DateOffset(years=2)
+        df_filtered = df[df[date_col] >= cutoff].dropna(subset=[value_col])
+        
+        if oos_col in df_filtered.columns:
+            # SOP 1.2: 排除 OOS 點
+            df_filtered = df_filtered[~df_filtered[oos_col].astype(bool)]
+        
+        values = df_filtered[value_col].values
+        
+        # 檢查是否有有效數據
+        if len(values) == 0:
+            print(f"    [Warning] 經過篩選後沒有有效數據點")
+            return values, None
+            
+        resolution = self.compute_resolution(values)
+        return values, resolution
+
+    # === Hard Rule Function ===
+
+    def apply_discrete_hard_rules(self, values, resolution, N):
+        if N < 4:
+            return None, None, False, None 
+
+        values = np.array(values)
+        val_counts = pd.Series(values).value_counts()
+        
+        if val_counts.empty:
+            return None, None, False, None
+
+        mode_val = val_counts.idxmax()
+        category_num = len(val_counts)
+        
+        # Rule 1: If Constant or non mode data# = 1
+        non_mode_count = N - val_counts.max()
+        if non_mode_count == 0 or non_mode_count == 1:
+            return mode_val, mode_val, True, "Hard Rule 1: Constant/Near Constant"
+
+        min_val = np.min(values)
+        max_val = np.max(values)
+        
+        # Rule 2: If data value category# = 2
+        if category_num == 2:
+            return max_val, min_val, True, "Hard Rule 2: Two Categories"
+
+        # Rule 3: If data value category# = 3 and max – min = 2*resolution
+        if category_num == 3 and resolution is not None and resolution > 0:
+            if abs((max_val - min_val) - 2 * resolution) < 1e-6: 
+                return max_val, min_val, True, "Hard Rule 3: Three Categories Spaced by Resolution"
+                
+        return None, None, False, None
+
+    # === SOP 2 & 3: Pattern Diagnosis ===
+
+    def data_prep_for_pattern(self, values):
+        N_orig = len(values)
+        if N_orig == 0: 
+            return values
+        if N_orig < 4: 
+            return values
+            
+        val_counts = pd.Series(values).value_counts()
+        mode_val = val_counts.idxmax()
+        mode_count = val_counts.max()
+        non_mode_count = N_orig - mode_count
+        
+        # SOP 2.1: 數據選擇
+        if non_mode_count / N_orig < 0.25:
+            max_mode_use = min(mode_count, non_mode_count * 3)
+            
+            # 特殊情況：當所有數據都相同時（non_mode_count = 0），直接返回原數據
+            if non_mode_count == 0:
+                print(f"    [Debug] data_prep_for_pattern: 所有數據都相同 ({mode_val})，直接返回原數據")
+                return values
+                
+            mode_data = values[values == mode_val][:max_mode_use]
+            non_mode_data = values[values != mode_val]
+            w = np.concatenate((mode_data, non_mode_data))
+        else:
+            w = values.copy()
+            
+        # 檢查 w 是否為空
+        if len(w) == 0:
+            print(f"    [Debug] data_prep_for_pattern: 預處理後數據為空，返回原數據")
+            return values
+            
+        # SOP 2.2: Min-Max 標準化
+        min_w, max_w = np.min(w), np.max(w)
+        if min_w == max_w: 
+            print(f"    [Debug] data_prep_for_pattern: 數據無變異性 (min=max={min_w})，返回原數據")
+            return values 
+            
+        x = (w - min_w) / (max_w - min_w)
+        
+        # SOP 2.3: Johnson SU Transformation
+        try:
+            params = johnsonsu.fit(x)
+            y = johnsonsu.rvs(*params, size=len(x))
+        except Exception:
+            y = x
+            
+        # SOP 2.4/2.5: Robust Z-score & 過濾異常值
+        z = self.robust_zscore_sop2(y)
+        
+        # 找出 ZI > 6 的點
+        outlier_mask = z > 6.0
+        outlier_indices = np.where(outlier_mask)[0]
+        
+        if len(outlier_indices) > 0:
+            # 檢查濾除比例
+            filter_ratio = len(outlier_indices) / len(w)
+            
+            if filter_ratio <= 0.05:  # 5% 以內，濾除所有異常值
+                w_filtered = w[~outlier_mask]
+            else:  # 超過 5%，只濾除所有最大 ZI 的點
+                max_z_value = np.max(z)
+                max_z_mask = z == max_z_value
+                w_filtered = w[~max_z_mask]
+        else:
+            w_filtered = w  # 沒有異常值
+            
+        return w_filtered
+
+    def pattern_diagnosis(self, values, resolution=None):
+        N = len(values)
+        if N < 4: 
+            return "Insufficient Data", np.nan, np.nan
+        
+        sigma = np.std(values)
+        val_counts = pd.Series(values).value_counts()
+        category_num = len(val_counts)
+        sk = skew(values, bias=False)
+        cb = self.compute_CB(values)
+        
+        if 4 <= N < 20: 
+            if sigma == 0: 
+                return "Constant", sk, cb
+            
+            near_constant_cond = (N - val_counts.max() == 1)
+            attribute_cond = (category_num / N <= 1/3 and category_num <= 5)
+            
+            if near_constant_cond: 
+                return "Near Constant", sk, cb
+            if attribute_cond: 
+                return "Attribute", sk, cb
+            if category_num / N >= 1/2:
+                if sk > 0.6: 
+                    return "Skew-Right", sk, cb
+                if sk < -0.6: 
+                    return "Skew-Left", sk, cb
+            return "Normal", sk, cb
+        
+        if N >= 20: 
+            if sigma == 0: 
+                return "Constant", sk, cb
+                
+            near_constant_cond = (val_counts.max() / N >= 0.9)
+            
+            attr_cond_A = (category_num / N <= 1/3 and category_num <= 5)
+            attr_cond_B = (resolution and sigma != 0 and resolution / (6*sigma) >= 0.1 and category_num < 10)
+            attr_cond_C = (N >= 30 and category_num <= 10)
+            attribute_cond = (attr_cond_A or attr_cond_B or attr_cond_C)
+            
+            if near_constant_cond: 
+                return "Near Constant", sk, cb
+            if attribute_cond: 
+                return "Attribute", sk, cb
+                
+            if cb > 0.6 and -0.6 <= sk <= 0.6: 
+                return "Bimodal", sk, cb
+                
+            if category_num / N >= 1/2:
+                if sk > 0.6: 
+                    return "Skew-Right", sk, cb
+                if sk < -0.6: 
+                    return "Skew-Left", sk, cb
+            return "Normal", sk, cb
+        return "Normal", sk, cb
+
+    # === SOP 4: Outlier Exclusion ===
+
+    def outlier_filter(self, values, pattern):
+        values = np.array(values)
+        N_orig = len(values)
+        if N_orig == 0 or np.std(values) == 0: 
+            return values
+        
+        if pattern in ["Skew-Right","Skew-Left"]:
+            # SOP 4.1: Skew Pattern - 6σ Robust Sigma 濾除
+            median_val = np.median(values)
+            U_R, L_R = self.compute_robust_sigma(values)
+            
+            mask = (values <= median_val + 6*U_R) & (values >= median_val - 6*L_R)
+            values_pre_filtered = values[mask]
+            
+            filter_ratio = (N_orig - len(values_pre_filtered)) / N_orig
+            
+            if filter_ratio <= 0.05:  # 5% 以內，使用濾除後的結果
+                return values_pre_filtered
+            else:  # 超過 5%，只濾除所有最大比例的點
+                ratio_upper = (values - median_val) / U_R
+                ratio_lower = (median_val - values) / L_R
+                ratio = np.maximum(ratio_upper, ratio_lower) 
+                max_ratio_value = np.max(ratio)
+                max_ratio_mask = ratio == max_ratio_value
+                values_filtered = values[~max_ratio_mask] 
+                return values_filtered
+        
+        else:
+            # SOP 4.2: Other Pattern - 4.5 Robust Z-score 濾除
+            z = self.robust_zscore_sop2(values)
+            values_pre_filtered = values[z <= 4.5] 
+            
+            filter_ratio = (N_orig - len(values_pre_filtered)) / N_orig
+            
+            if filter_ratio <= 0.05:  # 5% 以內，使用濾除後的結果
+                return values_pre_filtered
+            else:  # 超過 5%，只濾除所有最大 ZI 的點
+                max_z_value = np.max(z)
+                max_z_mask = z == max_z_value
+                values_filtered = values[~max_z_mask]
+                return values_filtered
+
+    # === SOP 5: Control Limit Calculation ===
+
+    def get_k_value(self, N, characteristic):
+        """SOP 5.2: 依資料筆數和特性決定 k 值"""
+        if N >= 30:
+            return 3.0
+        if 16 <= N <= 29: 
+            return 4.0
+        if 4 <= N <= 15: 
+            return 5.0
+        return 3.0
+
+    def calc_CL(self, values, pattern, resolution=None, characteristic='Nominal'):
+        """SOP 5.1 & 5.3: 計算 UCL/LCL"""
+        N = len(values)
+        if N < 4: 
+            return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+            
+        median_val = np.median(values)
+        mean_val = np.mean(values)
+        std_val = np.std(values)
+        k = self.get_k_value(N, characteristic)
+        
+        # 預先計算 Robust Sigma 和 ECDF 3-sigma 備用值
+        UR_robust, LR_robust = self.compute_robust_sigma(values)
+        UCL3_ecdf, LCL3_ecdf = np.nan, np.nan 
+        
+        # --- 1. 處理 Normal 模式 (Mean +/- k*Std) ---
+        if pattern == "Normal": 
+            UCL = mean_val + k * std_val
+            LCL = mean_val - k * std_val
+        
+        # --- 2. 處理 Skew 模式 (Median +/- k*RobustSigma) ---
+        elif pattern in ["Skew-Right", "Skew-Left"]: 
+            UCL = median_val + k * UR_robust
+            LCL = median_val - k * LR_robust
+            
+        # --- 3. 處理 ECDF 相關模式 (Bimodal, Attribute, Constant, Near Constant) ---
+        else:
+            # 3.1 ECDF: 強制使用 ECDF 確定基礎 3-sigma 水位 (UCL3, LCL3)
+            p_low_3sigma = 0.135
+            p_high_3sigma = 99.865
+            
+            try:
+                UCL3_ecdf = np.percentile(values, p_high_3sigma)
+                LCL3_ecdf = np.percentile(values, p_low_3sigma)
+            except Exception:
+                UCL3_ecdf = median_val + 3 * UR_robust
+                LCL3_ecdf = median_val - 3 * LR_robust
+
+            # 3.2 Tolerance 擴展邏輯
+            T_upper = UCL3_ecdf - median_val
+            T_lower = median_val - LCL3_ecdf
+            T_max = max(T_upper, T_lower)
+            
+            if T_max <= 0:
+                 UCL = UCL3_ecdf
+                 LCL = LCL3_ecdf
+            else:
+                 T_new = T_max * (k / 3.0) 
+                 UCL = median_val + T_new
+                 LCL = median_val - T_new
+                 
+        return UCL, LCL, UR_robust, LR_robust, UCL3_ecdf, LCL3_ecdf
+
+    # === SOP 6: Control Limit Adjustment & Tighten ===
+
+    def adjust_CL_based_on_OOC(self, values, UCL, LCL, pattern, resolution, sigma_est_u, sigma_est_l, max_adj_units=2, characteristic='Nominal'):
+        values = np.array(values)  # 确保 values 是 numpy array
+        current_UCL, current_LCL = UCL, LCL
+        N = len(values)
+        
+        sigma_u = sigma_est_u if sigma_est_u > 1e-9 else 1e-9
+        sigma_l = sigma_est_l if sigma_est_l > 1e-9 else 1e-9
+
+        if pattern == "Constant":
+            adj_u = adj_l = 0.0
+        elif pattern == "Near Constant" and resolution is not None and resolution > 0:
+            # Near Constant 模式使用 resolution 作為調整單位
+            adj_u = adj_l = resolution
+        elif pattern == "Attribute" and resolution is not None and resolution > 0 and sigma_est_u == 0:
+            # Attribute 模式使用 resolution 作為調整單位
+            adj_u = adj_l = resolution
+        else:
+            # Normal, Skew-Right, Skew-Left, Bimodal 都使用 0.25σ
+            adj_u = 0.25 * sigma_u
+            adj_l = 0.25 * sigma_l
+            
+        # 根據特性類型決定是否只調整單邊
+        adjust_ucl = True
+        adjust_lcl = True
+        
+        if characteristic == 'Smaller':
+            # Smaller 只需要 tighten UCL (上限)
+            adjust_lcl = False
+            adj_l = 0.0  # 不調整 LCL
+        elif characteristic == 'Bigger':
+            # Bigger 只需要 tighten LCL (下限)
+            adjust_ucl = False
+            adj_u = 0.0  # 不調整 UCL
+            
+        # 根据模式设置最大迭代次数
+        if pattern in ["Near Constant", "Attribute"]:
+            # Near Constant 和 Attribute 模式每次调整 1*resolution，最多调整 max_adj_units 次
+            max_iterations = max_adj_units if resolution is not None and resolution > 0 else 1
+        else:
+            max_iterations = int(max_adj_units / 0.25) + 1 if (sigma_u > 0 or sigma_l > 0) else 1
+        
+        initial_ooc_count = 0
+        final_ooc_count = 0
+        total_adj_units = 0
+
+        for i in range(max_iterations):
+            upper_ooc_mask = (values > current_UCL)
+            lower_ooc_mask = (values < current_LCL)
+            
+            upper_ooc_count = np.sum(upper_ooc_mask)
+            lower_ooc_count = np.sum(lower_ooc_mask)
+            total_ooc_count = upper_ooc_count + lower_ooc_count
+            
+            if i == 0: 
+                initial_ooc_count = total_ooc_count
+            
+            ooc_percent = total_ooc_count / N
+            
+            if ooc_percent <= 0.003 or total_ooc_count < 2: 
+                final_ooc_count = total_ooc_count
+                break
+                
+            if upper_ooc_count > 0 and adj_u > 0 and adjust_ucl:
+                current_UCL += adj_u
+                if pattern in ["Near Constant", "Attribute"]:
+                    total_adj_units += 1  # Near Constant 和 Attribute 模式每次调整算作 1 个单位
+                else:
+                    total_adj_units += adj_u / sigma_u
+            if lower_ooc_count > 0 and adj_l > 0 and adjust_lcl:
+                current_LCL -= adj_l
+                if pattern in ["Near Constant", "Attribute"]:
+                    total_adj_units += 1  # Near Constant 和 Attribute 模式每次调整算作 1 个单位
+                else:
+                    total_adj_units += adj_l / sigma_l
+                
+            if upper_ooc_count == 0 and lower_ooc_count == 0:
+                  final_ooc_count = total_ooc_count
+                  break
+
+        # SOP 6.3: 最終 CL 根據 resolution 修正
+        if resolution is not None and not np.isnan(current_UCL) and not np.isnan(current_LCL):
+            if resolution == 0:
+                decimals = 0
+            elif isinstance(resolution, int):
+                decimals = 0
+            else:
+                try:
+                    res_parts = str(resolution).split('.')
+                    if len(res_parts) > 1:
+                        res_str = res_parts[1].rstrip('0')
+                        decimals = len(res_str) if res_str else 0
+                    else:
+                        decimals = 0
+                except:
+                    decimals = 0
+            
+            if decimals >= 0:
+                power_of_10 = 10**decimals
+                current_UCL = floor(current_UCL * power_of_10) / power_of_10
+                current_LCL = ceil(current_LCL * power_of_10) / power_of_10
+
+            if current_LCL > current_UCL: 
+                current_LCL = current_UCL
+        
+
+        return current_UCL, current_LCL, initial_ooc_count, final_ooc_count, total_adj_units
+
+    def check_tighten(self, original_tol, new_tol, data_count):
+        """SOP 6.4: 判斷是否需要 tighten (容差比對)"""
+        tighten_flag, _, _ = self.check_tighten_with_details(original_tol, new_tol, data_count)
+        return tighten_flag
+    
+    def check_tighten_with_details(self, original_tol, new_tol, data_count):
+        """SOP 6.4: 判斷是否需要 tighten (容差比對) - 返回詳細資訊"""
+        N_pct_table = [(125,15),(70,18),(45,20),(30,25),(15,30),(10,35),(0,40)]
+        N_pct = 40 
+        for n_threshold, pct in N_pct_table:
+            if data_count > n_threshold:
+                N_pct = pct
+                break
+        
+        if original_tol <= 0: 
+            return False, np.nan, N_pct
+        
+        # 計算變化率（正值表示收緊，負值表示放寬）
+        diff_ratio = (original_tol - new_tol) / original_tol * 100
+        
+        # 邏輯：只有當容差收緊（new_tol < original_tol）且變化率 > N% 時，才判定為 TightenNeeded
+        # 如果放寬（new_tol > original_tol），則 diff_ratio 為負值，不會觸發 tighten
+        tighten_flag = diff_ratio > N_pct
+        
+        return tighten_flag, diff_ratio, N_pct
+
+    # === 核心流程包裝 ===
+    
+    def process_chart(self, df, value_col, date_col, oos_col, characteristic):
+        """主體 SOP 流程 (SOP 1-6)"""
+        
+        # 1. Data Integrity (SOP 1)
+        values_orig, resolution = self.data_integrity(df.copy(), date_col, value_col, oos_col)
+        
+        # 檢查是否有有效數據
+        if len(values_orig) == 0:
+            return {
+                "Pattern": "No Valid Data",
+                "Skew": np.nan,
+                "CB": np.nan,
+                "Resolution_Estimated": None,
+                "Suggest UCL": np.nan,
+                "Suggest LCL": np.nan,
+                "Static UCL": np.nan,
+                "Static LCL": np.nan,
+                "TightenNeeded": False,
+                "DataCountUsed": 0,
+                "HardRule": "None",
+                "DetectionLimit": np.nan,
+                "CL_Center": np.nan,
+                "Sigma_Est": 0.0,
+                "Sigma_Est_Upper": 0.0,
+                "Sigma_Est_Lower": 0.0,
+                "Original_UCL_K_Set": np.nan,
+                "Original_LCL_K_Set": np.nan,
+                "Suggest_UCL_K_Set": np.nan,
+                "Suggest_LCL_K_Set": np.nan,
+                "Ori_K_Set": np.nan,
+                "Sug_K_Set": np.nan,
+                "Total_Adj_Units": 0.0,
+                "Initial_OOC_Count": 0,
+                "Final_OOC_Count": 0,
+                "Original_Tolerance": np.nan,
+                "New_Tolerance": np.nan,
+                "Diff_Ratio_%": np.nan,
+                "Tighten_Threshold_%": np.nan
+            }
+        
+        # 檢查數據點是否 < 4 個
+        if len(values_orig) < 4:
+            print(f"    [Warning] 數據點不足 ({len(values_orig)} < 4)，跳過計算")
+            
+            # 讀取必要參數
+            detection_limit = df['DetectionLimit'].iloc[0] if 'DetectionLimit' in df.columns and len(df)>0 else np.nan
+            original_ucl = df['UCL'].iloc[0] if 'UCL' in df.columns and len(df)>0 else np.nan
+            original_lcl = df['LCL'].iloc[0] if 'LCL' in df.columns and len(df)>0 else np.nan
+            
+            # 計算 Ori OOC Count
+            ori_ooc_count = 0
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                ori_upper_ooc = np.sum(values_orig > original_ucl)
+                ori_lower_ooc = np.sum(values_orig < original_lcl)
+                ori_ooc_count = ori_upper_ooc + ori_lower_ooc
+            
+            return {
+                "Pattern": "Insufficient Data",
+                "Skew": np.nan,
+                "CB": np.nan,
+                "Resolution_Estimated": resolution,
+                "Suggest UCL": np.nan,
+                "Suggest LCL": np.nan,
+                "Static UCL": np.nan,
+                "Static LCL": np.nan,
+                "TightenNeeded": False,
+                "DataCountUsed": len(values_orig),
+                "HardRule": "Insufficient Data",
+                "DetectionLimit": detection_limit,
+                "CL_Center": np.nan,
+                "Sigma_Est": 0.0,
+                "Sigma_Est_Upper": 0.0,
+                "Sigma_Est_Lower": 0.0,
+                "Original_UCL_K_Set": np.nan,
+                "Original_LCL_K_Set": np.nan,
+                "Suggest_UCL_K_Set": np.nan,
+                "Suggest_LCL_K_Set": np.nan,
+                "Ori_K_Set": np.nan,
+                "Sug_K_Set": np.nan,
+                "Total_Adj_Units": 0.0,
+                "Ori_OOC_Count": ori_ooc_count,
+                "Static_OOC_Count": 0,
+                "Final_OOC_Count": 0,
+                "Original_Tolerance": np.nan,
+                "New_Tolerance": np.nan,
+                "Diff_Ratio_%": np.nan,
+                "Tighten_Threshold_%": np.nan
+            }
+        
+        # 1.5. Hard Rule Check (優先檢查，在 Pattern Diagnosis 之前)
+        print(f"    [Debug] 原始數據點數量: {len(values_orig)}")
+        print(f"    [Debug] 原始數據範圍: {np.min(values_orig):.4f} ~ {np.max(values_orig):.4f}")
+        
+        UCL_hr, LCL_hr, rule_satisfied, rule_applied_name = self.apply_discrete_hard_rules(
+            values_orig, resolution, len(values_orig))
+        
+        # 讀取額外參數
+        detection_limit = df['DetectionLimit'].iloc[0] if 'DetectionLimit' in df.columns and len(df)>0 else np.nan
+        original_ucl = df['UCL'].iloc[0] if 'UCL' in df.columns and len(df)>0 else np.nan
+        original_lcl = df['LCL'].iloc[0] if 'LCL' in df.columns and len(df)>0 else np.nan
+        target_val = df['Target'].iloc[0] if 'Target' in df.columns and len(df)>0 and pd.notna(df['Target'].iloc[0]) else np.nan
+
+        if rule_satisfied:
+            print(f"    [Debug] Hard Rule 滿足: {rule_applied_name}")
+            
+            # 根據特性類型決定使用 Hard Rule 的哪些管制線
+            if characteristic == 'Bigger':
+                # Bigger: 只使用 Hard Rule 的 LCL，UCL 保持原始值
+                suggest_ucl_hr = original_ucl if not pd.isna(original_ucl) else UCL_hr
+                suggest_lcl_hr = LCL_hr
+                print(f"    [Debug] Bigger 特性: 只調整 LCL = {LCL_hr:.4f}, UCL 保持原始 = {suggest_ucl_hr:.4f}")
+            elif characteristic == 'Smaller':
+                # Smaller: 只使用 Hard Rule 的 UCL，LCL 保持原始值
+                suggest_ucl_hr = UCL_hr
+                suggest_lcl_hr = original_lcl if not pd.isna(original_lcl) else LCL_hr
+                print(f"    [Debug] Smaller 特性: 只調整 UCL = {UCL_hr:.4f}, LCL 保持原始 = {suggest_lcl_hr:.4f}")
+            else:
+                # Nominal: 雙邊都使用 Hard Rule
+                suggest_ucl_hr = UCL_hr
+                suggest_lcl_hr = LCL_hr
+                print(f"    [Debug] Nominal 特性: 雙邊都調整 UCL = {UCL_hr:.4f}, LCL = {LCL_hr:.4f}")
+            
+            # Hard Rule 成立時，CL_Center 應為最終 UCL 和 LCL 的中點
+            cl_center_hr = (suggest_ucl_hr + suggest_lcl_hr) / 2
+            
+            # 判斷是否需要 tighten（檢查 Hard Rule 調整的管制線是否與原始值相同）
+            tighten_needed_hr = False  # 預設為 False
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                # 根據特性類型檢查相應的管制線是否改變
+                if characteristic == 'Bigger':
+                    # Bigger: 檢查 LCL 是否改變
+                    if abs(suggest_lcl_hr - original_lcl) > 1e-9:
+                        tighten_needed_hr = True
+                        print(f"    [Debug] Hard Rule (Bigger): LCL 改變 (原始={original_lcl:.4f}, 新={suggest_lcl_hr:.4f})，TightenNeeded = Yes")
+                    else:
+                        print(f"    [Debug] Hard Rule (Bigger): LCL 未改變，TightenNeeded = No")
+                elif characteristic == 'Smaller':
+                    # Smaller: 檢查 UCL 是否改變
+                    if abs(suggest_ucl_hr - original_ucl) > 1e-9:
+                        tighten_needed_hr = True
+                        print(f"    [Debug] Hard Rule (Smaller): UCL 改變 (原始={original_ucl:.4f}, 新={suggest_ucl_hr:.4f})，TightenNeeded = Yes")
+                    else:
+                        print(f"    [Debug] Hard Rule (Smaller): UCL 未改變，TightenNeeded = No")
+                else:
+                    # Nominal: 檢查 UCL 或 LCL 是否改變
+                    if abs(suggest_ucl_hr - original_ucl) > 1e-9 or abs(suggest_lcl_hr - original_lcl) > 1e-9:
+                        tighten_needed_hr = True
+                        print(f"    [Debug] Hard Rule (Nominal): 管制線改變 (UCL: {original_ucl:.4f}→{suggest_ucl_hr:.4f}, LCL: {original_lcl:.4f}→{suggest_lcl_hr:.4f})，TightenNeeded = Yes")
+                    else:
+                        print(f"    [Debug] Hard Rule (Nominal): 管制線未改變，TightenNeeded = No")
+            else:
+                # 沒有原始管制線時，Hard Rule 觸發即為需要 tighten
+                tighten_needed_hr = True
+                print(f"    [Debug] Hard Rule: 無原始管制線，TightenNeeded = Yes")
+            
+            # 計算 Ori OOC Count (使用原始管制線)
+            ori_ooc_count = 0
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                ori_upper_ooc = np.sum(values_orig > original_ucl)
+                ori_lower_ooc = np.sum(values_orig < original_lcl)
+                ori_ooc_count = ori_upper_ooc + ori_lower_ooc
+            
+            # 計算 Static/Final OOC Count (使用 Hard Rule 的管制線)
+            static_ooc_count = 0
+            static_upper_ooc = np.sum(values_orig > suggest_ucl_hr)
+            static_lower_ooc = np.sum(values_orig < suggest_lcl_hr)
+            static_ooc_count = static_upper_ooc + static_lower_ooc
+            
+            # 計算 Ori OOC Count (使用原始管制線)
+            ori_ooc_count = 0
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                ori_upper_ooc = np.sum(values_orig > original_ucl)
+                ori_lower_ooc = np.sum(values_orig < original_lcl)
+                ori_ooc_count = ori_upper_ooc + ori_lower_ooc
+            
+            # 計算 Static/Final OOC Count (使用 Hard Rule 的管制線)
+            static_ooc_count = 0
+            static_upper_ooc = np.sum(values_orig > suggest_ucl_hr)
+            static_lower_ooc = np.sum(values_orig < suggest_lcl_hr)
+            static_ooc_count = static_upper_ooc + static_lower_ooc
+            
+            # Hard Rule 滿足時，返回結果
+            return {
+                "Pattern": rule_applied_name,  # 直接顯示具體的 Hard Rule
+                "Skew": np.nan,  # Hard Rule 不需要 Skew/CB
+                "CB": np.nan,
+                "Resolution_Estimated": resolution,
+                "Suggest UCL": suggest_ucl_hr,
+                "Suggest LCL": suggest_lcl_hr,
+                "Static UCL": suggest_ucl_hr,
+                "Static LCL": suggest_lcl_hr, 
+                "TightenNeeded": tighten_needed_hr,  # 根據管制線是否改變判定
+                "DataCountUsed": len(values_orig),
+                "HardRule": rule_applied_name,
+                "DetectionLimit": detection_limit,
+                "CL_Center": cl_center_hr,
+                "Sigma_Est": 0.0, 
+                "Sigma_Est_Upper": 0.0,
+                "Sigma_Est_Lower": 0.0,
+                "Original_UCL_K_Set": np.nan,  # Hard Rule 無sigma概念
+                "Original_LCL_K_Set": np.nan,
+                "Suggest_UCL_K_Set": np.nan,
+                "Suggest_LCL_K_Set": np.nan,
+                "Ori_K_Set": np.nan,
+                "Sug_K_Set": np.nan,
+                "Total_Adj_Units": 0.0,
+                "Ori_OOC_Count": ori_ooc_count,
+                "Static_OOC_Count": static_ooc_count,
+                "Final_OOC_Count": static_ooc_count,  # Hard Rule 沒有退格，Static = Final
+                "Original_Tolerance": np.nan,
+                "New_Tolerance": np.nan,
+                "Diff_Ratio_%": np.nan,
+                "Tighten_Threshold_%": np.nan
+            }
+        
+        print(f"    [Debug] Hard Rule 不滿足，繼續進行 Pattern Diagnosis")
+        
+        # 2-4. Pattern Diagnosis & Outlier Filter
+        print(f"    [Debug] 原始數據點數量: {len(values_orig)}")
+        print(f"    [Debug] 原始數據範圍: {np.min(values_orig):.4f} ~ {np.max(values_orig):.4f}")
+        
+        values_for_pattern = self.data_prep_for_pattern(values_orig)
+        print(f"    [Debug] 預處理後數據點數量: {len(values_for_pattern)}")
+        
+        pattern, skew_value, cb_value = self.pattern_diagnosis(values_for_pattern, resolution)
+        print(f"    [Debug] 診斷出的模式: {pattern}, Skew: {skew_value:.4f}, CB: {cb_value:.4f}")
+        
+        values_filtered = self.outlier_filter(values_orig, pattern)
+        N_filtered = len(values_filtered)
+        print(f"    [Debug] 過濾後數據點數量: {N_filtered}")
+        if N_filtered > 0:
+            print(f"    [Debug] 過濾後數據範圍: {np.min(values_filtered):.4f} ~ {np.max(values_filtered):.4f}")
+        else:
+            print(f"    [Debug] 過濾後數據為空!")
+        
+        # 檢查過濾後的數據是否為空
+        if N_filtered == 0:
+            print(f"    [Warning] 過濾後沒有有效數據點，跳過計算")
+            
+            # 讀取必要參數
+            detection_limit = df['DetectionLimit'].iloc[0] if 'DetectionLimit' in df.columns and len(df)>0 else np.nan
+            original_ucl = df['UCL'].iloc[0] if 'UCL' in df.columns and len(df)>0 else np.nan
+            original_lcl = df['LCL'].iloc[0] if 'LCL' in df.columns and len(df)>0 else np.nan
+            
+            # 計算 Ori OOC Count (使用原始數據，即使過濾後為空)
+            ori_ooc_count = 0
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                ori_upper_ooc = np.sum(values_orig > original_ucl)
+                ori_lower_ooc = np.sum(values_orig < original_lcl)
+                ori_ooc_count = ori_upper_ooc + ori_lower_ooc
+            
+            return {
+                "Pattern": "No Data After Filter",
+                "Skew": np.nan,
+                "CB": np.nan,
+                "Resolution_Estimated": resolution,
+                "Suggest UCL": np.nan,
+                "Suggest LCL": np.nan,
+                "Static UCL": np.nan,
+                "Static LCL": np.nan,
+                "TightenNeeded": False,
+                "DataCountUsed": N_filtered,
+                "HardRule": "No Data After Filter",
+                "DetectionLimit": detection_limit,
+                "CL_Center": np.nan,
+                "Sigma_Est": 0.0,
+                "Sigma_Est_Upper": 0.0,
+                "Sigma_Est_Lower": 0.0,
+                "Original_UCL_K_Set": np.nan,
+                "Original_LCL_K_Set": np.nan,
+                "Suggest_UCL_K_Set": np.nan,
+                "Suggest_LCL_K_Set": np.nan,
+                "Ori_K_Set": np.nan,
+                "Sug_K_Set": np.nan,
+                "Total_Adj_Units": 0.0,
+                "Ori_OOC_Count": ori_ooc_count,
+                "Static_OOC_Count": 0,  # 過濾後無數據，無法計算 Static
+                "Final_OOC_Count": 0,
+                "Original_Tolerance": np.nan,
+                "New_Tolerance": np.nan,
+                "Diff_Ratio_%": np.nan,
+                "Tighten_Threshold_%": np.nan
+            }
+        
+        # 讀取額外參數（用於後續計算）
+        detection_limit = df['DetectionLimit'].iloc[0] if 'DetectionLimit' in df.columns and len(df)>0 else np.nan
+        original_ucl = df['UCL'].iloc[0] if 'UCL' in df.columns and len(df)>0 else np.nan
+        original_lcl = df['LCL'].iloc[0] if 'LCL' in df.columns and len(df)>0 else np.nan
+        target_val = df['Target'].iloc[0] if 'Target' in df.columns and len(df)>0 and pd.notna(df['Target'].iloc[0]) else np.nan
+
+        # 5. Statistical Model Fitting (SOP 5)
+        UCL_static, LCL_static, UR_robust, LR_robust, UCL3_ecdf, LCL3_ecdf = self.calc_CL(
+            values_filtered, pattern, resolution, characteristic
+        )
+        
+        # 決定 CL Center 和 Sigma Est
+        cl_center = np.nan
+        sigma_est_u = np.nan
+        sigma_est_l = np.nan
+        
+        if pattern in ["Constant", "Near Constant"]:
+            cl_center = np.median(values_filtered)
+            sigma_est_u = sigma_est_l = 0.0
+        elif pattern == "Normal":
+            cl_center = np.mean(values_filtered)
+            sigma_est_u = sigma_est_l = np.std(values_filtered)
+        elif pattern in ["Skew-Right", "Skew-Left"]:
+            cl_center = np.median(values_filtered)
+            sigma_est_u = UR_robust
+            sigma_est_l = LR_robust
+        else: # ECDF 相關模式 (Bimodal, Attribute)
+            cl_center = np.median(values_filtered)
+            T_upper_ecdf = UCL3_ecdf - cl_center
+            T_lower_ecdf = cl_center - LCL3_ecdf
+            if T_upper_ecdf > 1e-9 and T_lower_ecdf > 1e-9:
+                sigma_est_u = T_upper_ecdf / 3.0
+                sigma_est_l = T_lower_ecdf / 3.0
+            else:
+                sigma_est_u = UR_robust if UR_robust > 0 else 0.0
+                sigma_est_l = LR_robust if LR_robust > 0 else 0.0
+
+        sigma_est_output = max(sigma_est_u, sigma_est_l)
+        if not np.isfinite(sigma_est_output): 
+            sigma_est_output = 0.0 
+
+        # 計算 Ori OOC Count (使用原始管制線)
+        ori_ooc_count = 0
+        if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+            ori_upper_ooc = np.sum(values_orig > original_ucl)
+            ori_lower_ooc = np.sum(values_orig < original_lcl)
+            ori_ooc_count = ori_upper_ooc + ori_lower_ooc
+
+        # 6. Control Limit Adjustment (SOP 6.1/6.2/6.3/6.5)
+        # 使用原始數據 (values_orig) 來計算 OOC count，而不是過濾後的數據
+        UCL_suggest, LCL_suggest, static_ooc_count, final_ooc_count, total_adj_units = self.adjust_CL_based_on_OOC(
+            values_orig, UCL_static, LCL_static, pattern, resolution, sigma_est_u, sigma_est_l, 2, characteristic
+        )
+
+        # 6.5. Detection Limit Rule (僅適用於 Smaller 特性)
+        if characteristic == 'Smaller' and not np.isnan(detection_limit):
+            if UCL_suggest < detection_limit:
+                UCL_suggest = detection_limit
+
+        # 6.6. 管制線寬度約束 - 不允許建議管制線比原始管制線更寬
+        if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+            # Static UCL/LCL 約束：不超出原始管制線
+            if not np.isnan(UCL_static) and UCL_static > original_ucl:
+                UCL_static = original_ucl
+            if not np.isnan(LCL_static) and LCL_static < original_lcl:
+                LCL_static = original_lcl
+                
+            # Suggest UCL/LCL 約束：不超出原始管制線  
+            if not np.isnan(UCL_suggest) and UCL_suggest > original_ucl:
+                UCL_suggest = original_ucl
+            if not np.isnan(LCL_suggest) and LCL_suggest < original_lcl:
+                LCL_suggest = original_lcl
+        
+        # 6.6b. 根據特性類型設定 Static UCL/LCL 為原始值
+        if characteristic == 'Smaller':
+            # Smaller 特性：Static LCL = 原始 LCL (只需要 USL)
+            if not pd.isna(original_lcl):
+                LCL_static = original_lcl
+        elif characteristic == 'Bigger':
+            # Bigger 特性：Static UCL = 原始 UCL (只需要 LSL)
+            if not pd.isna(original_ucl):
+                UCL_static = original_ucl
+        
+        # 6.7a. Attribute/Near Constant 特殊邏輯：避免 UCL/LCL 卡在 max/min
+        if pattern in ["Attribute", "Near Constant"] and resolution is not None and resolution > 0 and len(values_filtered) > 0:
+            print(f"    [Debug] 進入 Attribute/Near Constant 特殊邏輯")
+            print(f"    [Debug] values_filtered 長度: {len(values_filtered)}")
+            
+            max_val = np.max(values_filtered)
+            min_val = np.min(values_filtered)
+            
+            # 暫存調整前的值
+            temp_UCL_suggest = UCL_suggest
+            temp_LCL_suggest = LCL_suggest
+            
+            # 檢查是否需要調整（卡在 max/min）
+            need_adjust_ucl = not np.isnan(UCL_suggest) and abs(UCL_suggest - max_val) < 1e-6
+            need_adjust_lcl = not np.isnan(LCL_suggest) and abs(LCL_suggest - min_val) < 1e-6
+            
+            if need_adjust_ucl:
+                temp_UCL_suggest = UCL_suggest + resolution
+                print(f"    [Debug] UCL 卡在 max ({max_val:.4f})，嘗試調整為 {temp_UCL_suggest:.4f}")
+            
+            if need_adjust_lcl:
+                temp_LCL_suggest = LCL_suggest - resolution
+                print(f"    [Debug] LCL 卡在 min ({min_val:.4f})，嘗試調整為 {temp_LCL_suggest:.4f}")
+            
+            # 檢查調整後是否比原始管制線更寬鬆
+            if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+                # 計算原始容差
+                if characteristic == 'Nominal':
+                    ori_tolerance = original_ucl - original_lcl
+                    new_tolerance = temp_UCL_suggest - temp_LCL_suggest
+                elif characteristic == 'Smaller':
+                    ori_tolerance = original_ucl - cl_center
+                    new_tolerance = temp_UCL_suggest - cl_center
+                elif characteristic == 'Bigger':
+                    ori_tolerance = cl_center - original_lcl
+                    new_tolerance = cl_center - temp_LCL_suggest
+                else:
+                    ori_tolerance = original_ucl - original_lcl
+                    new_tolerance = temp_UCL_suggest - temp_LCL_suggest
+                
+                # 如果調整後更寬鬆，保持原始值
+                if new_tolerance > ori_tolerance:
+                    print(f"    [Debug] 調整後容差 ({new_tolerance:.4f}) 比原始容差 ({ori_tolerance:.4f}) 更寬，保持原始管制線")
+                    # 不更新 UCL_suggest 和 LCL_suggest
+                else:
+                    print(f"    [Debug] 調整後容差 ({new_tolerance:.4f}) 未比原始容差 ({ori_tolerance:.4f}) 更寬，採用調整值")
+                    UCL_suggest = temp_UCL_suggest
+                    LCL_suggest = temp_LCL_suggest
+            else:
+                # 沒有原始管制線時，直接採用調整值
+                print(f"    [Debug] 無原始管制線，直接採用調整值")
+                UCL_suggest = temp_UCL_suggest
+                LCL_suggest = temp_LCL_suggest
+            
+        if characteristic == 'Smaller':
+            # Smaller 只允許 UCL 收緊，LCL 直接使用原始值 (只需要 USL)
+            if not pd.isna(original_lcl):
+                LCL_suggest = original_lcl
+        elif characteristic == 'Bigger':
+            # Bigger 只允許 LCL 收緊，UCL 直接使用原始值 (只需要 LSL)
+            if not pd.isna(original_ucl):
+                UCL_suggest = original_ucl
+
+        # 7. Tighten 判定 (SOP 6.4) 
+        tighten_flag = False
+        diff_ratio = np.nan
+        tighten_threshold = np.nan
+        original_tol = np.nan
+        new_tol = np.nan
+        
+        if not (pd.isna(original_ucl) or pd.isna(original_lcl)):
+            center_val = cl_center 
+            
+            if characteristic == 'Nominal':
+                # Nominal: tolerance = UCL – LCL
+                original_tol = original_ucl - original_lcl
+                new_tol = UCL_suggest - LCL_suggest
+            elif characteristic == 'Smaller':
+                # Smaller: tolerance = UCL – CL_Center
+                original_tol = original_ucl - center_val
+                new_tol = UCL_suggest - center_val
+                
+            elif characteristic == 'Bigger':
+                # Bigger: tolerance = CL_Center – LCL
+                original_tol = center_val - original_lcl
+                new_tol = center_val - LCL_suggest
+            else:
+                # 預設為 Nominal
+                original_tol = original_ucl - original_lcl
+                new_tol = UCL_suggest - LCL_suggest
+
+            # 進行 Tighten 檢查，並取得詳細資訊
+            if original_tol > 1e-9 and new_tol > 1e-9:
+                tighten_flag, diff_ratio, tighten_threshold = self.check_tighten_with_details(
+                    original_tol, new_tol, N_filtered
+                )
+        
+        # 8. 計算現行和建議管制線的K倍數
+        # 現行管制線的K倍數
+        original_ucl_k_set = np.nan
+        original_lcl_k_set = np.nan
+        suggest_ucl_k_set = np.nan
+        suggest_lcl_k_set = np.nan
+        
+        if not (pd.isna(original_ucl) or pd.isna(original_lcl)) and not pd.isna(cl_center):
+            if sigma_est_u > 1e-9:
+                original_ucl_k_set = (original_ucl - cl_center) / sigma_est_u
+                suggest_ucl_k_set = (UCL_suggest - cl_center) / sigma_est_u
+            if sigma_est_l > 1e-9:
+                original_lcl_k_set = (cl_center - original_lcl) / sigma_est_l
+                suggest_lcl_k_set = (cl_center - LCL_suggest) / sigma_est_l
+
+        # 計算Ori_k_set和Sug_k_set（根據特性類型決定計算方式）
+        ori_k_set = np.nan
+        sug_k_set = np.nan
+        
+        if characteristic == 'Bigger':
+            # Bigger 特性：只考慮 LCL 的 K 值
+            ori_k_set = original_lcl_k_set
+            sug_k_set = suggest_lcl_k_set
+        elif characteristic == 'Smaller':
+            # Smaller 特性：只考慮 UCL 的 K 值
+            ori_k_set = original_ucl_k_set
+            sug_k_set = suggest_ucl_k_set
+        else:
+            # Nominal 特性（預設）：取 UCL 和 LCL 的 K 值最大值
+            if not pd.isna(original_ucl_k_set) and not pd.isna(original_lcl_k_set):
+                ori_k_set = max(original_ucl_k_set, original_lcl_k_set)
+            elif not pd.isna(original_ucl_k_set):
+                ori_k_set = original_ucl_k_set
+            elif not pd.isna(original_lcl_k_set):
+                ori_k_set = original_lcl_k_set
+                
+            if not pd.isna(suggest_ucl_k_set) and not pd.isna(suggest_lcl_k_set):
+                sug_k_set = max(suggest_ucl_k_set, suggest_lcl_k_set)
+            elif not pd.isna(suggest_ucl_k_set):
+                sug_k_set = suggest_ucl_k_set
+            elif not pd.isna(suggest_lcl_k_set):
+                sug_k_set = suggest_lcl_k_set
+
+        # 9. 輸出結果
+        return {
+            "Pattern": pattern,
+            "Skew": skew_value,
+            "CB": cb_value,
+            "Resolution_Estimated": resolution,
+            "Suggest UCL": UCL_suggest,
+            "Suggest LCL": LCL_suggest,
+            "Static UCL": UCL_static,
+            "Static LCL": LCL_static,
+            "TightenNeeded": tighten_flag,
+            "DataCountUsed": N_filtered,
+            "HardRule": "None",
+            "DetectionLimit": detection_limit,
+            "CL_Center": cl_center,
+            "Sigma_Est": sigma_est_output,
+            "Sigma_Est_Upper": sigma_est_u,
+            "Sigma_Est_Lower": sigma_est_l,
+            "Original_UCL_K_Set": original_ucl_k_set,
+            "Original_LCL_K_Set": original_lcl_k_set,
+            "Suggest_UCL_K_Set": suggest_ucl_k_set,
+            "Suggest_LCL_K_Set": suggest_lcl_k_set,
+            "Ori_K_Set": ori_k_set,
+            "Sug_K_Set": sug_k_set,
+            "Total_Adj_Units": total_adj_units,
+            "Ori_OOC_Count": ori_ooc_count,
+            "Static_OOC_Count": static_ooc_count,
+            "Final_OOC_Count": final_ooc_count,
+            "Original_Tolerance": original_tol,
+            "New_Tolerance": new_tol,
+            "Diff_Ratio_%": diff_ratio,
+            "Tighten_Threshold_%": tighten_threshold
+        }
+
+    # === 檔案 I/O 與流程控制 ===
+
+    def load_chart_information(self, filepath):
+        """讀取 Chart 設定檔 (Excel)"""
+        try:
+            df_charts = pd.read_excel(filepath, sheet_name='Chart')
+            
+            # 確保 Resolution, DetectionLimit 存在
+            if 'Resolution' not in df_charts.columns: 
+                df_charts['Resolution'] = np.nan
+            if 'DetectionLimit' not in df_charts.columns: 
+                df_charts['DetectionLimit'] = np.nan
+                
+            # Target, UCL, LCL 為必須欄位
+            required_columns = ['Target', 'UCL', 'LCL']
+            for col in required_columns:
+                if col not in df_charts.columns:
+                    raise ValueError(f"缺少必須欄位: '{col}'")
+                    
+            # 檢查必須欄位是否有數值
+            for col in required_columns:
+                if df_charts[col].isna().any():
+                    missing_rows = df_charts[df_charts[col].isna()].index.tolist()
+                    raise ValueError(f"必須欄位 '{col}' 在第 {missing_rows} 行有缺失值")
+                
+            return df_charts
+        except Exception as e:
+            print(f"Error loading chart information from {filepath}: {e}")
+            return pd.DataFrame()
+
+    def find_matching_file(self, raw_data_directory, group_name, chart_name):
+        """根據命名規則匹配對應的 Raw Data CSV"""
+        pattern_base = f"{group_name}_{chart_name}"
+        
+        for filename in os.listdir(raw_data_directory):
+            if filename.endswith('.csv') and filename.startswith(pattern_base):
+                return os.path.join(raw_data_directory, filename)
+        return None
+
+    def plot_control_chart(self, chart_data, chart_info, suggest_ucl, suggest_lcl,
+                        static_ucl, static_lcl, cl_center, pattern, output_dir='output_charts', 
+                        max_x_labels=10):
+        """
+        繪製管制圖 (SPC Chart)
+        - 固定輸出 800x450 像素，高 DPI 保持清晰
+        - 包含所有管制線、建議線、靜態線與標註
+        """
+        import os
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 🎯 固定最終輸出大小：800x450 像素（不變大）
+        target_width_px, target_height_px = 900, 430
+        dpi = 100  # 高 DPI 保持線條平滑
+        fig = plt.figure(figsize=(target_width_px / dpi, target_height_px / dpi), dpi=dpi)
+        ax = fig.add_subplot(111)
+
+        # 全域抗鋸齒設定
+        plt.rcParams['lines.antialiased'] = True
+        plt.rcParams['patch.antialiased'] = True
+        fig.patch.set_antialiased(True)
+
+        # ========== 繪圖主體 ==========
+        # X 軸資料：使用等距位置，但顯示實際時間標籤
+        x = range(len(chart_data))  # 等距位置
+        
+        if 'date' in chart_data.columns:
+            # 轉換日期並使用統一格式 yyyy/m/d hh:mm
+            dates = pd.to_datetime(chart_data['date'])
+            date_format = '%Y/%m/%d %H:%M'
+
+            # 設定 X 軸標籤為實際時間，但位置是等距的
+            date_labels = [d.strftime(date_format) for d in dates]
+            
+            # 自動計算最佳標籤數量（垂直顯示，主要考慮視覺密度）
+            n_points = len(chart_data)
+            
+            # 垂直顯示允許更多標籤，盡量多顯示時間資訊
+            if n_points <= 15:
+                optimal_labels = n_points  # 少於 15 個點，全部顯示
+            elif n_points <= 50:
+                optimal_labels = min(n_points, int(n_points / 1))  # 顯示約 2/3 的點
+            else:
+                optimal_labels = min(n_points, 30)  # 最多顯示 30 個標籤
+            
+            # 確保至少顯示 2 個標籤（首尾）
+            optimal_labels = max(2, optimal_labels)
+            
+            # 總是確保刻度位置在視覺上均勻分布
+            if n_points <= optimal_labels:
+                # 點數少於最佳標籤數，全部顯示
+                tick_positions = list(x)  # x 本身就是 range(n_points)，已經等距
+                tick_labels = date_labels
+            else:
+                # 在等距的 X 軸位置上均勻選擇刻度
+                # x 是 range(n_points)，即 [0, 1, 2, ..., n_points-1]
+                # 我們要在這個等距序列上均勻選擇 optimal_labels 個位置
+                
+                # 計算均勻間隔
+                x_min = 0
+                x_max = n_points - 1
+                uniform_positions = np.linspace(x_min, x_max, optimal_labels)
+                
+                # 將浮點位置四捨五入到最近的整數位置
+                tick_indices = [int(round(pos)) for pos in uniform_positions]
+                
+                # 去除重複並確保在有效範圍內
+                tick_indices = sorted(list(set(tick_indices)))
+                tick_indices = [idx for idx in tick_indices if 0 <= idx < n_points]
+                
+                # 生成對應的位置和標籤
+                tick_positions = tick_indices  # 直接使用整數位置，這些已經是等距的
+                tick_labels = [date_labels[i] for i in tick_indices]
+            
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels, rotation=90, ha='center', fontsize=9)  # rotation=90 垂直顯示
+
+        y = chart_data['value'].values
+        
+        # 所有模式統一繪製：藍色連線
+        ax.plot(x, y, 'bo-', markersize=3, linewidth=1, alpha=0.8, antialiased=True)
+
+        # 判斷是否只顯示 Sug (當 Ori 與 Sug 差距太大時)
+        show_only_sug = False
+        if not np.isnan(suggest_ucl) and not np.isnan(suggest_lcl):
+            ori_range = abs(chart_info['UCL'] - chart_info['LCL'])
+            sug_range = abs(suggest_ucl - suggest_lcl)
+            # 如果 Ori 範圍是 Sug 範圍的 3 倍以上，只顯示 Sug
+            if ori_range > sug_range * 3:
+                show_only_sug = True
+
+        # 各種管制線
+        # Hard Rule 時不顯示 Target 線，避免視覺混亂
+        if "Hard Rule" not in pattern:
+            ax.axhline(y=chart_info['Target'], color='gray', linestyle='-', linewidth=1)
+        
+        # 只在差距不大時顯示 Ori UCL/LCL
+        if not show_only_sug:
+            ax.axhline(y=chart_info['UCL'], color='red', linestyle='--', linewidth=2)
+            ax.axhline(y=chart_info['LCL'], color='red', linestyle='--', linewidth=2)
+
+        if not np.isnan(suggest_ucl):
+            ax.axhline(y=suggest_ucl, color='#555555', linestyle='-', linewidth=1.5)
+        if not np.isnan(suggest_lcl):
+            ax.axhline(y=suggest_lcl, color='#555555', linestyle='-', linewidth=1.5)
+
+        # Static 線已移除，不再繪製
+
+        # ======= 標題 =======
+        # 使用計算結果的 pattern，而非 Excel 的 ExpectedPattern
+        sug_ucl_text = f"Sug_UCL: {suggest_ucl:.3f}" if not np.isnan(suggest_ucl) else "Sug_UCL: N/A"
+        sug_lcl_text = f"Sug_LCL: {suggest_lcl:.3f}" if not np.isnan(suggest_lcl) else "Sug_LCL: N/A"
+        title = (f"{chart_info['GroupName']}@{chart_info['ChartName']}@{chart_info['Characteristics']}\n"
+                f"Pattern: {pattern} | Data Cnt: {len(chart_data)} | {sug_ucl_text} | {sug_lcl_text}")
+        ax.set_title(title, fontsize=11)
+        ax.grid(False)
+
+        # ======= 調整 Y 軸範圍（特殊處理 Constant/Near Constant/Hard Rule）=======
+        if pattern in ["Constant", "Near Constant"] or "Hard Rule" in pattern:
+            # Constant/Near Constant/Hard Rule 模式：包含所有點，但合理設定 Y 軸範圍
+            y_data_min = y.min()
+            y_data_max = y.max()
+            
+            # 特殊處理：如果範圍太小（所有點都很接近），適當擴展 Y 軸
+            data_range = y_data_max - y_data_min
+            if data_range < 1e-6:  # 幾乎是常數
+                center = (y_data_min + y_data_max) / 2
+                margin = max(abs(center) * 0.1, 1.0)  # 至少 1 個單位的範圍
+                y_data_min = center - margin
+                y_data_max = center + margin
+            print(f"[{pattern}] 包含所有點，Y 軸範圍: [{y_data_min:.3f}, {y_data_max:.3f}]")
+        else:
+            # 一般模式：使用四分位數法排除極端值
+            q1 = np.percentile(y, 25)
+            q3 = np.percentile(y, 75)
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            # 過濾掉異常值後的數據範圍
+            y_filtered = y[(y >= lower_bound) & (y <= upper_bound)]
+            if len(y_filtered) > 0:
+                y_data_min = y_filtered.min()
+                y_data_max = y_filtered.max()
+            else:
+                # 如果全部都是異常值，還是使用原始範圍
+                y_data_min = y.min()
+                y_data_max = y.max()
+        
+        # 初始化 all_lines，Hard Rule 時不包含 Target
+        all_lines = [y_data_min, y_data_max]
+        if "Hard Rule" not in pattern:
+            all_lines.append(chart_info['Target'])
+        
+        # 根據是否只顯示 Sug 來決定包含哪些線
+        if show_only_sug:
+            # 只顯示 Sug 時，不包含 Ori UCL/LCL
+            for v in [suggest_ucl, suggest_lcl]:
+                if not np.isnan(v):
+                    all_lines.append(v)
+        else:
+            # 正常情況，包含所有線
+            all_lines.extend([chart_info['UCL'], chart_info['LCL']])
+            for v in [suggest_ucl, suggest_lcl]:
+                if not np.isnan(v):
+                    all_lines.append(v)
+        
+        # 計算 Y 軸範圍，處理 Hard Rule 情況下所有線重疊的問題
+        if max(all_lines) == min(all_lines):
+            # 所有線重疊時，使用數據範圍設定 Y 軸
+            center_line = max(all_lines)
+            data_range = y_data_max - y_data_min
+            if data_range == 0:
+                # 數據也是常數時，使用固定範圍
+                y_margin = abs(center_line) * 0.1 if center_line != 0 else 1.0
+            else:
+                y_margin = data_range * 0.2
+            ax.set_ylim(center_line - y_margin, center_line + y_margin)
+        else:
+            y_margin = (max(all_lines) - min(all_lines)) * 0.1
+            ax.set_ylim(min(all_lines) - y_margin, max(all_lines) + y_margin)
+
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+        # ======= 外側標註 =======
+        annotations = []
+        
+        # Hard Rule 時不顯示 Target 標註
+        if "Hard Rule" not in pattern:
+            annotations.append((chart_info['Target'], f"Target = {chart_info['Target']:.3f}", 'gray', 'normal'))
+
+        # 檢查重疊線並合併標註
+        tolerance = 1e-6  # 判斷線重疊的容差值
+        
+        # 收集所有UCL線的資訊
+        ucl_lines = []
+        if not show_only_sug and not np.isnan(chart_info['UCL']):
+            ucl_lines.append(('Ori', chart_info['UCL'], 'red', 'normal'))
+        if not np.isnan(suggest_ucl):
+            ucl_lines.append(('Sug', suggest_ucl, 'black', 'bold'))
+        
+        # 收集所有LCL線的資訊
+        lcl_lines = []
+        if not show_only_sug and not np.isnan(chart_info['LCL']):
+            lcl_lines.append(('Ori', chart_info['LCL'], 'red', 'normal'))
+        if not np.isnan(suggest_lcl):
+            lcl_lines.append(('Sug', suggest_lcl, 'black', 'bold'))
+        
+        # 處理UCL重疊
+        ucl_groups = []
+        for line in ucl_lines:
+            placed = False
+            for group in ucl_groups:
+                if abs(line[1] - group[0][1]) < tolerance:
+                    group.append(line)
+                    placed = True
+                    break
+            if not placed:
+                ucl_groups.append([line])
+        
+        # 處理LCL重疊
+        lcl_groups = []
+        for line in lcl_lines:
+            placed = False
+            for group in lcl_groups:
+                if abs(line[1] - group[0][1]) < tolerance:
+                    group.append(line)
+                    placed = True
+                    break
+            if not placed:
+                lcl_groups.append([line])
+        
+        # 檢查 UCL 和 LCL 之間的重疊（處理常數/卡定值情況）
+        all_cl_groups = []
+        
+        # 將所有 UCL 和 LCL 線合併到一起檢查
+        all_lines = []
+        for name, value, color, weight in ucl_lines:
+            all_lines.append((name, value, color, weight, 'UCL'))
+        for name, value, color, weight in lcl_lines:
+            all_lines.append((name, value, color, weight, 'LCL'))
+        
+        # 重新分組，包括跨 UCL/LCL 的重疊
+        for line in all_lines:
+            placed = False
+            for group in all_cl_groups:
+                if abs(line[1] - group[0][1]) < tolerance:
+                    group.append(line)
+                    placed = True
+                    break
+            if not placed:
+                all_cl_groups.append([line])
+        
+        # 生成合併後的標註
+        for group in all_cl_groups:
+            if len(group) == 1:
+                name, value, color, weight, cl_type = group[0]
+                annotations.append((value, f"{name} {cl_type} = {value:.3f}", color, weight))
+            else:
+                value = group[0][1]
+                # 使用最重要的顏色（優先順序：orange > red > purple）
+                color = 'orange' if any(line[2] == 'orange' for line in group) else \
+                       'red' if any(line[2] == 'red' for line in group) else 'purple'
+                weight = 'bold' if any(line[3] == 'bold' for line in group) else 'normal'
+                
+                # 分別收集 UCL 和 LCL 的名稱
+                ucl_names = [line[0] for line in group if line[4] == 'UCL']
+                lcl_names = [line[0] for line in group if line[4] == 'LCL']
+                
+                # 生成合併標籤
+                if ucl_names and lcl_names:
+                    # UCL 和 LCL 都有重疊，顯示為 Sug_UCL=Sug_LCL 格式
+                    ucl_part = '='.join(ucl_names) + '_UCL' if len(ucl_names) > 1 else ucl_names[0] + '_UCL'
+                    lcl_part = '='.join(lcl_names) + '_LCL' if len(lcl_names) > 1 else lcl_names[0] + '_LCL'
+                    combined_label = f"{ucl_part}={lcl_part}"
+                elif ucl_names:
+                    # 只有 UCL 重疊
+                    combined_label = '='.join(ucl_names) + ' UCL'
+                else:
+                    # 只有 LCL 重疊
+                    combined_label = '='.join(lcl_names) + ' LCL'
+                
+                annotations.append((value, f"{combined_label} = {value:.3f}", color, weight))
+
+        for y_val, text, color, weight in annotations:
+            ax.text(1.02, y_val, text, transform=ax.get_yaxis_transform(),
+                    color=color, fontsize=9, va='center', fontweight=weight, clip_on=False)
+
+        # ======= 輸出圖檔 - 保存為 SVG 向量格式 =======
+        # SVG 是向量圖形，無論如何縮放都完美清晰
+        filename_svg = os.path.join(output_dir, f"{chart_info['GroupName']}_{chart_info['ChartName']}.svg")
+        plt.savefig(filename_svg, format='svg', bbox_inches='tight', 
+                   facecolor='white', edgecolor='none')
+        
+        # 同時保存 PNG 作為備用
+        filename_png = os.path.join(output_dir, f"{chart_info['GroupName']}_{chart_info['ChartName']}.png")
+        plt.savefig(filename_png, dpi=200, bbox_inches='tight',
+                   facecolor='white', edgecolor='none')
+        plt.close()
+
+        return filename_svg  # 優先返回 SVG 路徑
+
+    def process_single_chart_data(self, chart_info_row, raw_data_df):
+        """將 Chart 設定與原始數據合併並運行核心 SOP 計算"""
+        
+        group_name = chart_info_row.get('GroupName', 'N/A')
+        chart_name = chart_info_row.get('ChartName', 'N/A')
+        
+        print(f"    [Debug] 開始處理 {group_name}_{chart_name}")
+        print(f"    [Debug] 原始 CSV 數據 shape: {raw_data_df.shape}")
+        print(f"    [Debug] 原始 CSV 欄位: {list(raw_data_df.columns)}")
+        if len(raw_data_df) > 0 and 'point_val' in raw_data_df.columns:
+            try:
+                print(f"    [Debug] 數據範圍: {raw_data_df['point_val'].min():.4f} ~ {raw_data_df['point_val'].max():.4f}")
+            except Exception as e:
+                print(f"    [Debug] 無法計算數據範圍: {e}")
+        else:
+            print(f"    [Debug] CSV 為空或缺少 point_val 欄位")
+        
+        # 1. 欄位重命名
+        raw_data_df.rename(columns={'point_time': 'date', 'point_val': 'value'}, inplace=True)
+        
+        # 2. 將所有相關參數從 Chart Info 傳遞給 Raw Data DataFrame
+        usl = chart_info_row.get('USL')
+        lsl = chart_info_row.get('LSL')
+        
+        raw_data_df['USL'] = usl
+        raw_data_df['LSL'] = lsl
+        raw_data_df['DetectionLimit'] = chart_info_row.get('DetectionLimit')
+        raw_data_df['Target'] = chart_info_row.get('Target')
+        raw_data_df['UCL'] = chart_info_row.get('UCL')
+        raw_data_df['LCL'] = chart_info_row.get('LCL')
+        
+        # 3. 動態計算 oos_flag - 根據特性類型決定檢查哪個規格限
+        characteristic = chart_info_row.get('Characteristics', 'Nominal')
+        print(f"    [Debug] USL: {usl}, LSL: {lsl}, 特性: {characteristic}")
+        
+        # 根據不同特性類型設定 OOS 檢查邏輯
+        if characteristic == 'Bigger':
+            # Bigger chart 只需要 LSL，不檢查 USL
+            if lsl is not None and not np.isnan(lsl):
+                raw_data_df['oos_flag'] = (raw_data_df['value'] < lsl)
+                oos_count = raw_data_df['oos_flag'].sum()
+                print(f"    [Debug] Bigger chart - 只檢查 LSL，OOS 點數: {oos_count}/{len(raw_data_df)}")
+            else:
+                raw_data_df['oos_flag'] = False
+                print(f"    [Debug] Bigger chart - 無有效 LSL，設置所有點為非 OOS")
+        elif characteristic == 'Smaller':
+            # Smaller chart 只需要 USL，不檢查 LSL  
+            if usl is not None and not np.isnan(usl):
+                raw_data_df['oos_flag'] = (raw_data_df['value'] > usl)
+                oos_count = raw_data_df['oos_flag'].sum()
+                print(f"    [Debug] Smaller chart - 只檢查 USL，OOS 點數: {oos_count}/{len(raw_data_df)}")
+            else:
+                raw_data_df['oos_flag'] = False
+                print(f"    [Debug] Smaller chart - 無有效 USL，設置所有點為非 OOS")
+        else:
+            # Nominal 或其他類型：檢查雙邊規格限
+            if (usl is not None and not np.isnan(usl)) and \
+               (lsl is not None and not np.isnan(lsl)) and \
+               (usl > lsl):
+                raw_data_df['oos_flag'] = (raw_data_df['value'] > usl) | (raw_data_df['value'] < lsl)
+                oos_count = raw_data_df['oos_flag'].sum()
+                print(f"    [Debug] Nominal chart - 檢查雙邊規格限，OOS 點數: {oos_count}/{len(raw_data_df)}")
+            else:
+                raw_data_df['oos_flag'] = False
+                print(f"    [Debug] Nominal chart - 無有效 USL/LSL，設置所有點為非 OOS")
+            
+        print(f"    [Debug] 準備進入核心計算，特性: {chart_info_row.get('Characteristics', 'Nominal')}")
+        
+        try:
+            # 4. 運行核心計算
+            results = self.process_chart(
+                df=raw_data_df,
+                value_col='value',
+                date_col='date',
+                oos_col='oos_flag',
+                characteristic=chart_info_row.get('Characteristics', 'Nominal')
+            )
+            
+            # 5. 格式化輸出
+            final_output = chart_info_row.to_dict()
+            final_output.update(results)
+            final_output['Status'] = 'Success'
+            
+            # 讓舊 UCL/LCL 欄位仍為 Suggest 的值
+            final_output['Original UCL'] = final_output['Suggest UCL']
+            final_output['Original LCL'] = final_output['Suggest LCL']
+            
+            # 四捨五入 - 但 Hard Rule 保持原始精度
+            is_hard_rule = final_output.get('Pattern') == "Hard Rule Applied"
+            
+            if not is_hard_rule:  # 只有非 Hard Rule 才進行四捨五入
+                for key in ['Original UCL', 'Original LCL', 'Static UCL', 'Static LCL', 
+                           'Suggest UCL', 'Suggest LCL', 'CL_Center']:
+                    if key in final_output and not np.isnan(final_output.get(key, np.nan)):
+                        final_output[key] = round(final_output[key], 4)
+                
+                # 四捨五入 Sigma 相關欄位
+                for sigma_key in ['Sigma_Est', 'Sigma_Est_Upper', 'Sigma_Est_Lower']:
+                    if sigma_key in final_output and not np.isnan(final_output.get(sigma_key, np.nan)):
+                        final_output[sigma_key] = round(final_output[sigma_key], 6)
+                
+                # 四捨五入 K 倍數欄位
+                for k_set_key in ['Original_UCL_K_Set', 'Original_LCL_K_Set',
+                                 'Suggest_UCL_K_Set', 'Suggest_LCL_K_Set',
+                                 'Ori_K_Set', 'Sug_K_Set']:
+                    if k_set_key in final_output and not np.isnan(final_output.get(k_set_key, np.nan)):
+                        final_output[k_set_key] = round(final_output[k_set_key], 3)
+            
+            # 6. 生成管制圖
+            try:
+                plot_filename = self.plot_control_chart(
+                    chart_data=raw_data_df,
+                    chart_info=chart_info_row,
+                    suggest_ucl=final_output['Suggest UCL'],
+                    suggest_lcl=final_output['Suggest LCL'],
+                    static_ucl=final_output['Static UCL'],
+                    static_lcl=final_output['Static LCL'],
+                    cl_center=final_output['CL_Center'],
+                    pattern=final_output['Pattern']
+                )
+                final_output['PlotFile'] = plot_filename
+            except Exception as plot_error:
+                print(f"     [Warning] 繪圖失敗: {plot_error}")
+                final_output['PlotFile'] = 'Plot Failed'
+            
+            return final_output
+            
+        except Exception as e:
+            import traceback
+            print(f"     [Error] 運行核心計算時發生錯誤: {e}")
+            print(f"     [Error] 詳細錯誤追踪:")
+            traceback.print_exc()
+            return {
+                'ChartName': chart_info_row['ChartName'], 
+                'Status': 'Calculation Error', 
+                'ErrorMessage': str(e),
+                'PlotFile': 'Calculation Error'
+            }
+
+    def run_calculation(self, output_filename='CL_Calculation_Results.xlsx'):
+        """執行完整的 CL 計算流程"""
+        
+        if not self.chart_info_path or not os.path.exists(self.chart_info_path):
+            raise ValueError(f"圖表資訊檔案不存在: {self.chart_info_path}")
+            
+        if not self.raw_data_dir or not os.path.exists(self.raw_data_dir):
+            raise ValueError(f"原始數據目錄不存在: {self.raw_data_dir}")
+
+        print("--- 1. 載入圖表配置 ---")
+        all_charts_info = self.load_chart_information(self.chart_info_path)
+        if all_charts_info.empty:
+            raise ValueError("無法載入有效的圖表配置")
+
+        self.results = []
+        
+        print(f"--- 2. 處理 {len(all_charts_info)} 張圖表的數據 ---")
+        
+        for index, chart_info in all_charts_info.iterrows():
+            group_name = chart_info.get('GroupName', 'N/A')
+            chart_name = chart_info.get('ChartName', 'N/A')
+            
+            print(f"  > 處理 Chart: {group_name}_{chart_name}...")
+            
+            filepath = self.find_matching_file(self.raw_data_dir, group_name, chart_name)
+            
+            if filepath is None:
+                print(f"    [Warning] 未找到匹配的原始數據文件。跳過。")
+                result = chart_info.to_dict()
+                result['Status'] = 'No Raw Data'
+                result['PlotFile'] = 'No Raw Data'
+                self.results.append(result)
+                continue
+
+            try:
+                raw_df = pd.read_csv(filepath)
+                results_dict = self.process_single_chart_data(chart_info, raw_df)
+                self.results.append(results_dict)
+                
+            except Exception as e:
+                print(f"    [Error] 讀取數據時發生錯誤: {e}")
+                error_result = chart_info.to_dict()
+                error_result['Status'] = 'File Read Error'
+                error_result['ErrorMessage'] = str(e)
+                error_result['PlotFile'] = 'File Read Error'
+                self.results.append(error_result)
+                
+        # --- 3. 輸出結果文件 ---
+        
+        df_output = pd.DataFrame(self.results)
+        
+        # 調整輸出欄位順序
+        output_cols_priority = [
+            'GroupName', 'ChartName', 'ChartID', 'Material_no', 
+            'Status', 'ErrorMessage',
+            'Suggest UCL', 'Suggest LCL', 
+            'Static UCL', 'Static LCL',
+            'UCL', 'LCL',
+            'Original UCL', 'Original LCL',
+            'CL_Center', 'Sigma_Est', 'Sigma_Est_Upper', 'Sigma_Est_Lower',
+            'Original_UCL_K_Set', 'Original_LCL_K_Set',
+            'Suggest_UCL_K_Set', 'Suggest_LCL_K_Set',
+            'Ori_K_Set', 'Sug_K_Set',
+            'Ori_OOC_Count', 'Static_OOC_Count', 'Final_OOC_Count', 'Total_Adj_Units',
+            'Target', 'USL', 'LSL', 
+            'DetectionLimit', 
+            'Pattern', 'Resolution_Estimated', 'Characteristics', 
+            'TightenNeeded', 'Original_Tolerance', 'New_Tolerance', 'Diff_Ratio_%', 'Tighten_Threshold_%',
+            'DataCountUsed', 'HardRule',
+            'PlotFile' 
+        ]
+        
+        existing_output_cols = [col for col in output_cols_priority if col in df_output.columns]
+        df_output = df_output[existing_output_cols]
+        
+        df_output.to_excel(output_filename, index=False)
+        
+        print("\n--- 4. 流程結束 ---")
+        print(f"計算結果已成功輸出至：{output_filename}")
+        
+        return df_output
+
+    def get_results(self):
+        """取得計算結果"""
+        return self.results if hasattr(self, 'results') else []
+
+# === 執行入口 ===
+if __name__ == '__main__':
+    calculator = CLTightenCalculator(
+        chart_info_path='input/All_Chart_Information.xlsx',
+        raw_data_dir='input/raw_charts/'
+    )
+    calculator.run_calculation()
