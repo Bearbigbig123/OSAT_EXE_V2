@@ -5,6 +5,7 @@ import numpy as np
 from PyQt6 import QtWidgets, QtCore, QtGui
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 import oob_module_NGK_nostatic as oob_module
 
 class SlidingToggleSwitch(QtWidgets.QAbstractButton):
@@ -1005,7 +1006,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 ax.set_xticks([])
                 ax.grid(True, axis='y', linestyle=':', alpha=0.4)
                 ax.tick_params(labelsize=8)
-                ax.legend(fontsize=7, loc='upper left', frameon=True, ncol=3, framealpha=0.9, edgecolor='#d1d5db')
+                ax.legend(fontsize=7, loc='upper left', frameon=True, ncol=4, framealpha=0.9, edgecolor='#d1d5db')
             else:
                 ax.text(0.5, 0.5, "No Tool Info", ha='center', va='center')
         else:
@@ -1052,13 +1053,13 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                     tool_data = df_plot[df_plot[tool_col] == t]['point_val']
                     if len(tool_data) > 3:
                         (osm, osr), (slope, intercept, r) = stats.probplot(tool_data, dist="norm")
-                        ax.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.5, label=t, edgecolors='none')
-                        ax.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.2, linewidth=1)
+                        ax.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.8, label=t, edgecolors='none')
+                        ax.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.8, linewidth=1)
                 
                 ax.set_xticks([-3, -2, -1, 0, 1, 2, 3])
-                ax.grid(True, linestyle=':', alpha=0.4)
+                ax.grid(True, linestyle=':', alpha=0.8)
                 ax.tick_params(labelsize=8)
-                ax.legend(fontsize=7, loc='upper left', frameon=True, ncol=3, framealpha=0.9, edgecolor='#d1d5db')
+                ax.legend(fontsize=7, loc='upper left', frameon=True, ncol=4, framealpha=0.9, edgecolor='#d1d5db')
             else:
                 ax.text(0.5, 0.5, "No Tool Info", ha='center', va='center')
         else:
@@ -1560,7 +1561,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                             ax.axvspan(xl, xr, color=col, alpha=0.2, zorder=0, linewidth=0)
                             mid_x = (xl + xr) / 2
                             if not np.isnan(mid_x):
-                                ax.text(mid_x, 1.05, lab, transform=text_trans, ha='center', va='top', 
+                                ax.text(mid_x, 0.98, lab, transform=text_trans, ha='center', va='top', 
                                         fontsize=8, color='#374151', alpha=0.9)
                         
                 except Exception as e:
@@ -1579,19 +1580,21 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             # 找到原本 ax.plot 畫趨勢線的地方，將它設為底層 zorder
             ax.plot(x, y, linestyle='-', color='#d1d5db', linewidth=1, zorder=1) 
 
-            # --- 新增：按 Tool 分色畫點 ---
-            if 'ByTool' in plot_df.columns:
+            # --- 新增：按 Tool 分色畫點（若無 Tool 則使用統一顏色）---
+            tool_col = next((c for c in ['ByTool', 'tool_id', '機台'] if c in plot_df.columns), None)
+            
+            if tool_col and not plot_df[tool_col].isna().all():
                 try:
                     # 過濾掉 NaN 和無效的 Tool 值
                     plot_df_with_tool = plot_df.copy()
-                    plot_df_with_tool['ByTool'] = plot_df_with_tool['ByTool'].astype(str)
-                    plot_df_tools = plot_df_with_tool[plot_df_with_tool['ByTool'] != 'nan'].copy()
+                    plot_df_with_tool[tool_col] = plot_df_with_tool[tool_col].astype(str)
+                    plot_df_tools = plot_df_with_tool[plot_df_with_tool[tool_col] != 'nan'].copy()
                     
                     if not plot_df_tools.empty:
-                        tools = sorted(plot_df_tools['ByTool'].unique())
+                        tools = sorted(plot_df_tools[tool_col].unique())
                         colors = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed']
                         for i, tool in enumerate(tools):
-                            mask = plot_df_with_tool['ByTool'] == tool
+                            mask = plot_df_with_tool[tool_col] == tool
                             if mask.any():
                                 x_masked = [x[j] for j in range(len(x)) if mask.iloc[j]]
                                 y_masked = [y[j] for j in range(len(y)) if mask.iloc[j]]
@@ -1600,27 +1603,42 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                                                color=colors[i % len(colors)], label=str(tool), 
                                                s=35, zorder=3, edgecolors='white', linewidth=0.5)
                         if tools:  # 只有在有有效 Tool 時才顯示圖例
-                            ax.legend(loc='upper left', fontsize=7, frameon=True, ncol=3, framealpha=0.9, edgecolor='#d1d5db')
+                            ax.legend(loc='upper left', fontsize=7, frameon=True, ncol=4, framealpha=0.9, edgecolor='#d1d5db')
+                    else:
+                        # 無有效 Tool 資訊：使用統一深藍色點
+                        ax.scatter(x, y, color='#2563eb', s=35, zorder=3, edgecolors='white', linewidth=0.5)
                 except Exception as e:
                     print(f"[WARN] 繪製 By Tool 點失敗: {e}")
+                    # 發生錯誤時也使用統一顏色
+                    ax.scatter(x, y, color='#2563eb', s=35, zorder=3, edgecolors='white', linewidth=0.5)
+            else:
+                # 無機台資訊：使用統一深藍色點（解決只有線沒有點的問題）
+                ax.scatter(x, y, color='#2563eb', s=35, zorder=3, edgecolors='white', linewidth=0.5)
+            # === Y 軸全域同步：統一計算包含數據、USL、LSL、Target 的範圍 ===
+            all_relevant_vals = list(y)
+            if usl is not None and not np.isnan(usl):
+                all_relevant_vals.append(usl)
+            if lsl is not None and not np.isnan(lsl):
+                all_relevant_vals.append(lsl)
+            if target is not None and not np.isnan(target):
+                all_relevant_vals.append(target)
+            
+            if len(all_relevant_vals) > 0:
+                y_min_global = min(all_relevant_vals)
+                y_max_global = max(all_relevant_vals)
+                y_rng = y_max_global - y_min_global
+                margin = y_rng * 0.15 if y_rng > 0 else 1.0
+                shared_ylim = (y_min_global - margin, y_max_global + margin)
+            else:
+                shared_ylim = (0.0, 1.0)
+            
+            ax.set_ylim(shared_ylim)
+            
+            # 標記超規點（繪製於統一 Y 軸範圍內）
             if usl is not None:
                 ax.scatter([xi for xi, yi in zip(x, y) if yi > usl], [yi for yi in y if yi > usl], color='#dc2626', s=36, zorder=5, label='_nolegend_')
             if lsl is not None:
                 ax.scatter([xi for xi, yi in zip(x, y) if yi < lsl], [yi for yi in y if yi < lsl], color='#dc2626', marker='s', s=36, zorder=5, label='_nolegend_')
-            # 計算 y 範圍（納入 USL/LSL/Target/Mean）避免被裁切
-            extra_vals = [v for v in [usl, lsl, target, mean_val]
-                          if v is not None and not (isinstance(v, float) and np.isnan(v))]
-            if len(y) > 0:
-                ymin_sel = float(np.min(y))
-                ymax_sel = float(np.max(y))
-            else:
-                ymin_sel, ymax_sel = (0.0, 1.0)
-            if extra_vals:
-                ymin_sel = min(ymin_sel, min(extra_vals))
-                ymax_sel = max(ymax_sel, max(extra_vals))
-            rng = ymax_sel - ymin_sel
-            margin = 0.05 * rng if rng > 0 else 1.0
-            ax.set_ylim(ymin_sel - margin, ymax_sel + margin)
 
             # 畫短水平線，並讓文字直接接在線的末端
             from matplotlib import transforms as mtransforms
@@ -1671,8 +1689,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             self.figure.subplots_adjust(top=0.90, bottom=0.12, left=0.08, right=0.95)
             self.canvas.draw()
             
-            # 繪製完成後呼叫子圖繪製
-            self._draw_analysis_plots(raw_df, chart_info)
+            # 繪製完成後呼叫子圖繪製（傳遞統一的 Y 軸範圍）
+            self._draw_analysis_plots(plot_df, chart_info, shared_ylim)
         except Exception as e:
             # 發生任何錯誤時，顯示錯誤訊息而非閃退
             print(f"[ERROR] 繪製圖表時發生錯誤: {e}")
@@ -1682,8 +1700,14 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             ax.text(0.5, 0.5, f"{tr('chart_error')}\n{str(e)}", ha='center', va='center', transform=ax.transAxes, color='red')
             self.canvas.draw()
 
-    def _draw_analysis_plots(self, df, chart_info):
-        """繪製下方兩張工具分析圖"""
+    def _draw_analysis_plots(self, df, chart_info, shared_ylim):
+        """繪製下方兩張工具分析圖（Boxplot 與 Q-Q Plot）
+        
+        Args:
+            df: 過濾後的數據 DataFrame
+            chart_info: 圖表配置資訊
+            shared_ylim: 從主圖傳遞的統一 Y 軸範圍 (y_min, y_max)
+        """
         import scipy.stats as stats
         import pandas as pd
         import numpy as np
@@ -1698,11 +1722,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             # 資料預處理
             df_plot = df.copy()
             df_plot['point_val'] = pd.to_numeric(df_plot['point_val'], errors='coerce')
-            if 'point_time' in df_plot.columns:
-                df_plot['point_time'] = pd.to_datetime(df_plot['point_time'], errors='coerce')
-                df_plot = df_plot.dropna(subset=['point_val', 'point_time'])
-            else:
-                df_plot = df_plot.dropna(subset=['point_val'])
+            df_plot = df_plot.dropna(subset=['point_val'])
             
             # 過濾掉 NaN 的 Tool 資料
             df_plot = df_plot[pd.notna(df_plot[tool_col])].copy()
@@ -1715,46 +1735,45 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 return
             
             tools = sorted(df_plot[tool_col].unique())
-            color_cycle = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#0891b2']
-            tool_colors = {t: color_cycle[i % len(color_cycle)] for i, t in enumerate(tools)}
+            colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#0891b2']
+            tool_colors = {t: colors[i % len(colors)] for i, t in enumerate(tools)}
 
-            # --- 圖 2: Tool-by-Tool Comparison (左下：水平排排站 + 組內連線) ---
+            # --- 圖 2: 精美 Boxplot（填充色 + 抖動點）---
             ax2 = self.fig_sub2.add_subplot(111)
-            ax2.set_title("Tool Variation Comparison", fontsize=10, fontweight='bold', pad=10)
+            ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
             ax2.set_ylabel("Measured Value", fontsize=8)
-            ax2.set_xlabel("Tool Groups", fontsize=8)
-
-            group_width = 10 
-            gap = 5
-            for i, t in enumerate(tools):
-                subset = df_plot[df_plot[tool_col] == t]
-                if 'point_time' in subset.columns:
-                    subset = subset.sort_values('point_time').reset_index(drop=True)
-                else:
-                    subset = subset.reset_index(drop=True)
-                    
-                start_x = i * (group_width + gap)
-                x_internal = start_x + subset.index
-                color = tool_colors[t]
+            
+            # 準備數據
+            data_to_plot = [df_plot[df_plot[tool_col] == t]['point_val'].values for t in tools]
+            
+            # 繪製箱線圖（使用 patch_artist 填充顏色）
+            bp = ax2.boxplot(data_to_plot, labels=[str(t) for t in tools], 
+                             patch_artist=True, widths=0.6,
+                             showfliers=False,  # 不顯示異常值標記（改用抖動點）
+                             medianprops={'color': 'white', 'linewidth': 1.5},
+                             whiskerprops={'color': '#4b5563', 'linewidth': 1},
+                             capprops={'color': '#4b5563', 'linewidth': 1})
+            
+            # 為每個箱體填充顏色並加入抖動點
+            for i, (box, tool) in enumerate(zip(bp['boxes'], tools)):
+                color = colors[i % len(colors)]
+                box.set(facecolor=color, alpha=0.7, edgecolor=color)
                 
-                # 繪製組內連線與點（加上 label 以便顯示在 legend 中）
-                ax2.plot(x_internal, subset['point_val'], color=color, alpha=0.3, linewidth=1, zorder=2, label='_nolegend_')
-                ax2.scatter(x_internal, subset['point_val'], color=color, s=20, alpha=0.7, zorder=3, edgecolors='white', linewidth=0.5, label=str(t))
+                # 加入抖動點 (Jitter) 增加美感與數據密度可視化
+                vals = data_to_plot[i]
+                x_jitter = np.random.normal(i + 1, 0.04, size=len(vals))
+                ax2.scatter(x_jitter, vals, alpha=0.4, color=color, s=10, zorder=3)
 
-            ax2.set_xticks([])  # 隱藏 X 軸數字刻度
+            # 套用統一的 Y 軸範圍
+            ax2.set_ylim(shared_ylim)
             ax2.grid(True, axis='y', linestyle=':', alpha=0.4)
             ax2.tick_params(labelsize=8)
-            # 添加 legend
-            ax2.legend(fontsize=7, loc='upper left', frameon=True, ncol=3, framealpha=0.9, edgecolor='#d1d5db')
-            
-            # 同步大圖 Y 軸範圍，確保對比機台 Bias 有意義
-            if self.figure.axes:
-                try:
-                    ax2.set_ylim(self.figure.axes[0].get_ylim())
-                except:
-                    pass
+            # 設置 X 軸標籤旋轉
+            for label in ax2.get_xticklabels():
+                label.set_rotation(90)
+                label.set_ha('right')
 
-            # --- 圖 3: Normal Probability Plot (右下：Q-Q 圖標籤與格式優化) ---
+            # --- 圖 3: Normal Probability Plot (Q-Q 圖) ---
             ax3 = self.fig_sub3.add_subplot(111)
             ax3.set_title("Normal Probability Plot", fontsize=10, fontweight='bold', pad=10)
             ax3.set_xlabel("Theoretical Quantiles (σ)", fontsize=8)
@@ -1765,24 +1784,32 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 if len(tool_data) > 3:
                     (osm, osr), (slope, intercept, r) = stats.probplot(tool_data, dist="norm")
                     # 繪製實測點
-                    ax3.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.5, label=t, edgecolors='none')
+                    ax3.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.8, label=str(t), edgecolors='none')
                     # 繪製常態分佈基準線（直線）
-                    ax3.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.2, linewidth=1)
+                    ax3.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.8, linewidth=1)
             
-            # 強制 Z-score 刻度，讓你一眼看出 3σ 邊界
-            ax3.set_xticks([-3, -2, -1, 0, 1, 2, 3])
+            # 套用統一的 Y 軸範圍
+            ax3.set_ylim(shared_ylim)
+            ax3.legend(fontsize=7, loc='upper left', ncol=4)
             ax3.grid(True, linestyle=':', alpha=0.4)
             ax3.tick_params(labelsize=8)
-            ax3.legend(fontsize=7, loc='upper left', frameon=True, ncol=3, framealpha=0.9, edgecolor='#d1d5db')
         else:
-            # 若無數據或無 Tool 資訊則顯示空白提示
-            for fig in [self.fig_sub2, self.fig_sub3]:
-                ax = fig.add_subplot(111)
-                ax.text(0.5, 0.5, "No Tool Info Found", ha='center', va='center')
+            # 若無 Tool 資訊，兩張圖都只顯示文字提示
+            ax2 = self.fig_sub2.add_subplot(111)
+            ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
+            ax2.text(0.5, 0.5, "No Tool Info", ha='center', va='center', transform=ax2.transAxes, fontsize=12)
+            ax2.set_xticks([])
+            ax2.set_yticks([])
+            
+            ax3 = self.fig_sub3.add_subplot(111)
+            ax3.set_title("Normal Probability Plot", fontsize=10, fontweight='bold', pad=10)
+            ax3.text(0.5, 0.5, "No Tool Info", ha='center', va='center', transform=ax3.transAxes, fontsize=12)
+            ax3.set_xticks([])
+            ax3.set_yticks([])
 
         # 最終佈局調整：確保 Title 和 Label 不會被裁切
-        self.fig_sub2.subplots_adjust(left=0.18, bottom=0.22, right=0.95, top=0.85)
-        self.fig_sub3.subplots_adjust(left=0.18, bottom=0.22, right=0.95, top=0.85)
+        self.fig_sub2.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
+        self.fig_sub3.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
         
         self.canvas_sub2.draw()
         self.canvas_sub3.draw()
