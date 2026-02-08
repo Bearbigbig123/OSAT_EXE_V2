@@ -503,6 +503,11 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.excel_path = ""
         self.raw_data_dir = ""
         self.all_logs = []
+        self.pass_logs = []  # 暫存 Pass 日誌，最後批次顯示
+        self.error_buffer = []  # 錯誤緩衝區，累積後批次顯示
+        self._is_refreshing = False  # 防止重複渲染的旗標
+        self._current_row_index = 0  # 追蹤當前表格行數
+        self._batch_size = 25  # 每累積25筆錯誤就批次顯示一次
         
         self.init_ui()
         self.apply_styles()
@@ -718,9 +723,11 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
             tr("open_csv", "Open CSV")
         ])
         
-        # 重新顯示日誌以更新內容
-        if self.all_logs:
+        # 重新顯示日誌以更新內容 - 只在語言切換時更新，避免頁面切換時重新渲染
+        if self.all_logs and not self._is_refreshing:
+            self._is_refreshing = True  # 設定旗標，防止重複觸發
             self.display_sorted_logs()
+            self._is_refreshing = False
     
     def translate_log_message(self, text):
         """翻譯日誌訊息 - 嘗試匹配已知的錯誤訊息並翻譯"""
@@ -972,11 +979,17 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.btn_open_source.setEnabled(False) # 開始時禁用
         self.table.setRowCount(0)
         self.all_logs = []
+        self.pass_logs = []  # 清空暫存的 Pass 日誌
+        self.error_buffer = []  # 清空錯誤緩衝區
+        self._current_row_index = 0  # 重置行索引
         
         self.lbl_val_total.setText("0")
         self.lbl_val_unable.setText("0")
         self.lbl_val_skipped.setText("0")
         self.lbl_val_passed.setText("0")
+        
+        # 暫停排序功能，檢查期間禁用
+        self.table.setSortingEnabled(False)
 
         self.worker = DataValidatorWorker(self.excel_path, self.raw_data_dir)
         self.worker.progress_updated.connect(self.update_progress)
@@ -996,11 +1009,60 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.lbl_val_passed.setText(str(passed))
 
     def add_log_entry(self, log):
-        """收集 log 記錄，但不立即顯示（等待排序）"""
+        """收集 log 記錄，錯誤使用小批次緩衝顯示，Pass 最後批次顯示"""
         self.all_logs.append(log)
+        
+        severity = log.get('Severity', '')
+        
+        # 錯誤和警告加入緩衝區
+        if severity in ['Unable to Execute', 'Warning', 'Skipped']:
+            self.error_buffer.append(log)
+            
+            # 累積到批次大小時，批次顯示
+            if len(self.error_buffer) >= self._batch_size:
+                self._flush_error_buffer()
+        elif severity == 'Pass':
+            # Pass 日誌暫存，最後批次顯示
+            self.pass_logs.append(log)
     
-    def display_sorted_logs(self):
-        """按照優先級排序並顯示所有 logs - 針對大量資料優化"""
+    def _flush_error_buffer(self):
+        """批次顯示緩衝區中的錯誤日誌"""
+        if not self.error_buffer:
+            return
+        
+        # 暫停UI更新
+        self.table.setUpdatesEnabled(False)
+        
+        # 一次性分配行數
+        start_row = self._current_row_index
+        self.table.setRowCount(start_row + len(self.error_buffer))
+        
+        # 批次渲染
+        for i, log in enumerate(self.error_buffer):
+            self._add_log_to_table_optimized(log, start_row + i)
+        
+        # 更新行索引
+        self._current_row_index += len(self.error_buffer)
+        
+        # 恢復UI更新（觸發一次重繪）
+        self.table.setUpdatesEnabled(True)
+        
+        # 清空緩衝區
+        self.error_buffer.clear()
+        
+        # 讓UI有時間響應
+        QtWidgets.QApplication.processEvents()
+    
+    def display_sorted_logs(self, force_refresh=False):
+        """按照優先級排序並顯示所有 logs - 針對大量資料優化
+        
+        Args:
+            force_refresh: 強制刷新表格（用於檢查完成或語言切換），否則只在需要時更新
+        """
+        # 如果正在刷新且非強制，跳過
+        if self._is_refreshing and not force_refresh:
+            return
+            
         # 定義排序優先級
         severity_order = {
             'Unable to Execute': 1,
@@ -1182,8 +1244,41 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
     def on_check_finished(self, passed):
         self.progress_bar.setValue(self.progress_bar.maximum())
         
-        # [新增] 排序並顯示所有 logs
-        self.display_sorted_logs()
+        # [優化] 先清空剩餘的錯誤緩衝區
+        if self.error_buffer:
+            print(f"[DEBUG] 清空剩餘 {len(self.error_buffer)} 筆錯誤緩衝")
+            self._flush_error_buffer()
+        
+        # [優化] 批次顯示所有 Pass 日誌 - 使用高效能方法
+        if self.pass_logs:
+            total_pass = len(self.pass_logs)
+            print(f"[DEBUG] 開始批次顯示 {total_pass} 筆 Pass 日誌")
+            
+            # [關鍵優化] 暫停UI更新，大幅提升性能
+            self.table.setUpdatesEnabled(False)
+            
+            # 一次性分配所有行（不使用insertRow，避免重複觸發佈局）
+            pass_start_row = self._current_row_index
+            self.table.setRowCount(pass_start_row + total_pass)
+            
+            # 批次渲染，每100筆更新進度
+            for i, log in enumerate(self.pass_logs):
+                self._add_log_to_table_optimized(log, pass_start_row + i)
+                
+                # 每100筆顯示進度
+                if (i + 1) % 100 == 0:
+                    progress = int((i + 1) / total_pass * 100)
+                    print(f"[DEBUG] Pass 日誌顯示進度: {progress}% ({i + 1}/{total_pass})")
+            
+            # 恢復UI更新
+            self.table.setUpdatesEnabled(True)
+            print(f"[DEBUG] Pass 日誌顯示完成，共 {total_pass} 筆")
+        
+        # 重新啟用排序功能
+        self.table.setSortingEnabled(True)
+        
+        # 應用篩選器
+        self.apply_filter()
         
         # [修改] 不論 passed 為 True/False，都啟用這些按鈕
         self.btn_start.setEnabled(True)

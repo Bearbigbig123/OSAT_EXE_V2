@@ -7,7 +7,7 @@
 class TranslationManager:
     """全域翻譯管理器 - 單例模式"""
     _instance = None
-    _current_lang = "ZH_TW"  # 預設繁體中文
+    _current_lang = "ZH_TW"  # 預設繁體中文 (可選: ZH_TW, EN, KO)
     
     def __new__(cls):
         if cls._instance is None:
@@ -50,12 +50,24 @@ class TranslationManager:
     
     def get(self, key, default=""):
         """獲取翻譯文字"""
-        translations = Translations.ZH_TW if self._current_lang == "ZH_TW" else Translations.EN
+        if self._current_lang == "ZH_TW":
+            translations = Translations.ZH_TW
+        elif self._current_lang == "EN":
+            translations = Translations.EN
+        elif self._current_lang == "KO":
+            translations = Translations.KO
+        else:
+            translations = Translations.ZH_TW
         return translations.get(key, default)
     
     def toggle_language(self):
-        """切換語言"""
-        self.current_lang = "EN" if self._current_lang == "ZH_TW" else "ZH_TW"
+        """切換語言 (循環: 中文 -> English -> 한국어)"""
+        if self._current_lang == "ZH_TW":
+            self.current_lang = "EN"
+        elif self._current_lang == "EN":
+            self.current_lang = "KO"
+        else:  # KO
+            self.current_lang = "ZH_TW"
         return self.current_lang
 
 
@@ -78,6 +90,8 @@ class Translations:
         "ready": "Ready.",
         "success": "Success",
         "failed": "Failed",
+        "running_analysis": "Running Analysis...",
+        "loading_data": "Loading Data",
         
         # === Main Menu ===
         "home": "Home",
@@ -88,7 +102,7 @@ class Translations:
         "cl_tighten": "CL Tighten Cal.",
         
         # === Language ===
-        "lang_button": "🌐 中文",
+        "lang_button": "🌐 한국어",
         "current_language": "Current Language: English",
         
         # === Buttons ===
@@ -473,6 +487,8 @@ class Translations:
         "ready": "準備就緒。",
         "success": "成功",
         "failed": "失敗",
+        "running_analysis": "執行分析中...",
+        "loading_data": "正在載入數據",
         
         # === 主選單 ===
         "home": "首頁",
@@ -848,6 +864,380 @@ class Translations:
         # === 預處理 ===
         "preprocessing_chart_types": "預處理圖表數據類型",
         "preprocessing_complete_starting_charts": "數據類型預處理完成，開始圖表處理...",
+    }
+    
+    KO = {
+        # === 공통 ===
+        "app_title": "SPC 차트 처리 시스템",
+        "select": "선택",
+        "cancel": "취소",
+        "close": "닫기",
+        "save": "저장",
+        "export": "내보내기",
+        "start": "시작",
+        "processing": "처리 중...",
+        "complete": "완료",
+        "error": "오류",
+        "warning": "경고",
+        "ready": "준비 완료.",
+        "success": "성공",
+        "failed": "실패",
+        "running_analysis": "분석 실행 중...",
+        "loading_data": "데이터 로드 중",
+        
+        # === 메인 메뉴 ===
+        "home": "홈",
+        "split_data": "데이터 분할",
+        "oob_spc_system": "OOB / SPC 분석 시스템",
+        "cpk_calculator": "Cpk 대시보드",
+        "tool_matching": "장비 일치성 분석",
+        "cl_tighten": "관리선 계산",
+        
+        # === 언어 ===
+        "lang_button": "🌐 中文",
+        "current_language": "현재 언어: 한국어",
+        
+        # === 버튼 ===
+        "start_processing": "실행 시작",
+        "export_results": "결과 내보내기",
+        "browse_files": "파일 찾아보기...",
+        "browse_folder": "폴더 찾아보기...",
+        "start_cl_calculation": "🚀 CL 계산 시작",
+        "export_to_excel": "📁 Excel로 내보내기",
+        "clear_results": "🗑️ 결과 지우기",
+        
+        # === 파일 작업 ===
+        "select_excel_file": "Excel 파일 선택",
+        "select_output_folder": "출력 폴더 선택",
+        "select_raw_data_folder": "원시 데이터 폴더 선택",
+        "excel_files": "Excel 파일",
+        "all_files": "모든 파일",
+        
+        # === 차트 처리 ===
+        "show_charts_gui": "인터페이스에 차트 표시",
+        "show_by_tool_charts": "장비 분석 차트 표시 (By Tool)",
+        "use_interactive_charts": "인터랙티브 차트 사용",
+        "use_batch_id_labels": "Batch ID를 X축 라벨로 사용",
+        "custom_time_range": "사용자 정의 분석 시간 범위",
+        "enable_custom_range": "사용자 정의 시간 범위 활성화",
+        "start_time": "시작 시간:",
+        "end_time": "종료 시간:",
+        "quick_select": "빠른 선택:",
+        "last_7_days": "최근 7일",
+        "last_30_days": "최근 30일",
+        "last_90_days": "최근 90일",
+        "this_month": "이번 달",
+        "last_month": "지난 달",
+        
+        # === 통계 대시보드 ===
+        "summary_dashboard": "📊 통계 대시보드",
+        "total_charts": "총 차트 수",
+        "processed_successfully": "성공적으로 처리됨",
+        "no_data": "데이터 없음",
+        "charts_with_ooc": "OOC 포함 차트",
+        "charts_with_we": "WE 규칙 포함 차트",
+        "charts_with_oob": "OOB 포함 차트",
+        "charts_with_anomaly": "이상 포함 차트",
+        "normal_charts": "정상 차트",
+        
+        # === CL 강화 ===
+        "need_tighten": "강화 필요",
+        "no_tighten_needed": "강화 불필요",
+        "chart_info_file": "차트 정보 파일:",
+        "raw_data_folder": "원시 데이터 폴더:",
+        "output_folder": "출력 폴더:",
+        "calculation_results": "계산 결과",
+        "no_results": "아직 계산 결과 없음",
+        
+        # === 데이터 분할 ===
+        "input_excel_file": "입력 Excel 파일:",
+        "output_folder_label": "출력 폴더:",
+        "split_results": "분할 결과",
+        "total_groups": "총 그룹 수",
+        "total_files": "총 생성된 파일 수",
+        "split_complete": "분할 완료!",
+        
+        # === 상태 메시지 ===
+        "loading": "로드 중...",
+        "calculating": "계산 중...",
+        "exporting": "내보내는 중...",
+        "exporting_charts": "차트 데이터 내보내는 중...",
+        "export_progress": "내보내기 진행률",
+        "processing_chart": "처리 중",
+        "export_cancelled": "취소됨",
+        "export_cancelled_msg": "내보내기가 취소되었습니다",
+        "export_successful": "내보내기 성공",
+        "export_successful_msg": "Excel을 다음 위치로 내보냈습니다:",
+        "export_failed": "내보내기 실패",
+        "export_failed_msg": "Excel 내보내기 실패:",
+        "file_saved": "파일 저장 성공",
+        "no_file_selected": "파일이 선택되지 않음",
+        "invalid_file": "잘못된 파일",
+        "operation_cancelled": "작업 취소됨",
+        "chart_error": "차트 오류",
+        "chart_info_not_loaded": "차트 정보가 아직 로드되지 않았습니다. 먼저 분석을 실행하세요.",
+        "settings": "설정",
+        "calculation_mode_settings": "계산 모드 설정",
+        "custom_calculation_mode": "사용자 정의 계산 구간 모드",
+        "custom_mode_hint": "날짜 범위를 자유롭게 조정할 수 있습니다. 시스템은 지정된 구간에 따라 Cpk를 계산하고 동일한 길이의 과거 데이터와 자동으로 비교합니다.",
+        "auto_mode_hint": "시스템이 최신 데이터 시점을 자동으로 감지하여 최근 3개월의 Cpk를 계산합니다.",
+        "start_date": "시작 날짜",
+        "end_date": "종료 날짜",
+        
+        # === 오류 메시지 ===
+        "error_loading_file": "파일 로드 중 오류",
+        "error_processing": "처리 중 오류",
+        "error_saving": "파일 저장 중 오류",
+        "missing_columns": "필수 열 누락",
+        
+        # === 테이블 헤더 ===
+        "group_name": "그룹 이름",
+        "chart_name": "차트 이름",
+        "chart_id": "차트 ID",
+        "material_no": "자재 번호",
+        "pattern": "패턴",
+        "suggest_ucl": "제안 UCL",
+        "suggest_lcl": "제안 LCL",
+        "static_ucl": "정적 UCL",
+        "static_lcl": "정적 LCL",
+        "tighten_needed": "강화 필요",
+        "status": "상태",
+        
+        # === 장비 매칭 ===
+        "tool_matching_title": "장비 매칭",
+        "browse_files_with_icon": "📁 파일 찾아보기...",
+        "example_button": "💾 예제",
+        "formula_explanation": "공식 설명",
+        "mean_index_threshold": "평균 지수 임계값:",
+        "sigma_index_threshold": "표준편차 지수 임계값:",
+        "fill_sample_size": "샘플 크기 채우기:",
+        "data_filter_mode": "데이터 필터 모드:",
+        "all_data": "모든 데이터",
+        "specified_date": "지정 날짜 (1개월 평균/6개월 표준편차)",
+        "latest_entry": "최신 데이터 (1개월 평균/6개월 표준편차)",
+        "specified_base_date": "지정 기준 날짜:",
+        "run_analysis": "🚀 분석 실행",
+        "select_file_prompt": "파일을 선택하고 분석을 시작하려면 클릭하세요.",
+        "matching_group": "매칭 그룹",
+        "mean_index": "평균 지수",
+        "sigma_index": "표준편차 지수",
+        "k_value": "K 값",
+        "mean": "평균",
+        "sigma": "표준편차",
+        "mean_median": "평균 중앙값",
+        "sigma_median": "표준편차 중앙값",
+        "sample_size": "샘플 크기",
+        "calculation_formula": "📘 계산 공식 (클릭하여 펼치기)",
+        "calculation_formula_hide": "📘 계산 공식 (클릭하여 접기)",
+        
+        # === 데이터 분할 ===
+        "split_data_title": "CSV 파일 분할 도구",
+        "split_data_description": "이 도구는 특정 형식의 CSV 파일을 여러 개의 독립적인 CSV 파일로 분할할 수 있습니다.",
+        "split_data_type2_desc": "SPC Chart 형식이 수직으로 배열된 경우 **Type2** 분할 방법을 선택하세요.",
+        "split_data_type3_desc": "수평으로 배열된 경우 **Type3** 분할 방법을 선택하세요.",
+        "select_input_files": "1. 입력 파일 선택",
+        "select_csv_files": "하나 이상의 CSV 파일을 선택하세요 (여러 파일은 세미콜론 ';'로 구분)...",
+        "select_output_folder_title": "2. 출력 폴더 선택",
+        "select_processing_mode": "3. 처리 모드 선택",
+        "select_file_type": "파일 유형 선택:",
+        "type3_horizontal": "Type3_수평 (수평 배열)",
+        "type2_vertical": "Type2_수직 (수직 배열)",
+        "type3_example": "Type3 예제",
+        "type2_example": "Type2 예제",
+        "processing_progress": "처리 진행률: %p%",
+        "browse": "찾아보기...",
+        "ready": "준비 완료.",
+        
+        # === SPC Cpk 대시보드 ===
+        "spc_cpk_dashboard": "SPC Cpk 대시보드",
+        "download_cpk_detail": "Cpk 세부 정보 다운로드",
+        "chart": "차트:",
+        "custom_time_mode": "사용자 정의 시간 모드",
+        "cpk": "Cpk",
+        "l1_cpk": "L1 Cpk",
+        "l2_cpk": "L2 Cpk",
+        "long_term_cpk": "장기 Cpk",
+        "r1": "R1",
+        "r2": "R2",
+        "k": "K",
+        "spc_chart": "SPC 차트",
+        "prev": "◀ 이전",
+        "next": "다음 ▶",
+        "chart_info_not_loaded": "차트 정보가 아직 로드되지 않았습니다!",
+        
+        # === 요약 대시보드 ===
+        "total_charts": "총 차트 수:",
+        "processed_successfully": "성공적으로 처리됨:",
+        "no_data_charts": "데이터 없음:",
+        "charts_with_ooc": "OOC 포함 차트:",
+        "charts_with_we_rule": "WE 규칙 포함 차트:",
+        "charts_with_oob": "OOB 포함 차트:",
+        "charts_with_anomalies_details": "이상 차트 세부 정보",
+        "ooc_count": "OOC 횟수",
+        "we_rules": "WE 규칙",
+        "oob_rules": "OOB 규칙",
+        "processed": "처리됨",
+        
+        # === 사용자 정의 시간 범위 ===
+        "custom_time_range": "사용자 정의 시간 분석 범위",
+        "enable_custom_time_range": "사용자 정의 시간 범위 활성화",
+        
+        # === 장비 매칭 주의사항 ===
+        "notice": "주의:",
+        "notice_abnormal_only": "아래 표는 이상 항목만 표시합니다.",
+        "mean_not_matched": "평균 불일치",
+        "sigma_not_matched": "분산 불일치",
+        "insufficient_data": "데이터 부족",
+        "insufficient_data_desc": "샘플 크기 < 5, 비교 미수행",
+        "click_formula_expand": "아래 \"계산 공식\"을 클릭하여 자세한 설명을 펼치거나 접을 수 있습니다.",
+        
+        # === OOB SPC 시스템 ===
+        "start_process": "처리 시작",
+        "threshold_settings": "임계값 설정",
+        "data_processing_settings": "데이터 처리 설정",
+        "chart_processing_settings": "차트 처리 설정",
+        "display_settings": "표시 설정",
+        "overall_processing_status": "전체 처리 상태",
+        "violation_rate": "위반율 (처리된 차트)",
+        "charts_with_anomalies": "이상 차트",
+        "violating": "위반",
+        "normal": "정상",
+        "all_normal": "모두 정상",
+        "ooc": "OOC",
+        "we_rule": "WE_규칙",
+        "oob": "OOB",
+        "number_of_charts": "차트 수",
+        "please_select_csv": "CSV 파일을 선택하세요...",
+        
+        # === CL 강화 ===
+        "calculation_range": "계산 구간:",
+        "chart_list": "차트 목록",
+        "search_placeholder": "차트 검색...",
+        "chart_details": "차트 세부 정보",
+        "chart_name_label": "차트 이름:",
+        "group_name_label": "그룹 이름:",
+        "current_ucl": "현재 UCL:",
+        "current_lcl": "현재 LCL:",
+        "suggested_ucl": "제안 UCL:",
+        "suggested_lcl": "제안 LCL:",
+        "tightening_factor": "강화 계수:",
+        "data_points": "데이터 포인트 수:",
+        "mean_value": "평균:",
+        "sigma_value": "표준편차:",
+        "no_chart_selected": "차트가 선택되지 않음",
+        "select_chart_prompt": "목록에서 차트를 선택하여 세부 정보를 확인하세요",
+        "no_data_loaded": "데이터가 로드되지 않음",
+        "no_data_file": "데이터 파일 없음",
+        "calc_error": "계산 오류",
+        "read_error": "읽기 오류",
+        
+        # === OOB 시스템 탭 ===
+        "chart_processing": "차트 처리",
+        "summary_dashboard_tab": "요약 대시보드",
+        
+        # === 데이터 상태 확인 ===
+        "data_health_monitor": "데이터 상태 모니터",
+        "start_check": "▶ 확인 시작",
+        "allchartinfo_excel": "📂 AllChartInfo Excel",
+        "export_report": "📁 보고서 내보내기",
+        "checking": "확인 중",
+        "no_file_loaded": "파일이 로드되지 않음",
+        "total_scanned": "총 스캔 수",
+        "passed": "통과",
+        "skipped": "건너뜀",
+        "critical_errors": "심각한 오류",
+        "unable_to_execute": "실행 불가",
+        "only_show_errors": "오류 항목만 표시",
+        "check_details": "확인 세부 정보",
+        "severity": "상태",
+        "location": "위치",
+        "issue_description": "문제 설명",
+        "suggested_action": "권장 조치",
+        "open_csv": "파일 열기",
+        "open": "📂 열기",
+        "n_a": "없음",
+        "path_not_set": "경로가 올바르게 설정되지 않았습니다.",
+        "file_not_found": "파일을 찾을 수 없습니다.",
+        "csv_file_not_found": "CSV 파일을 찾을 수 없습니다",
+        "export_log": "로그 내보내기",
+        "export_success": "보고서 저장 위치",
+        "permission_denied_export": "⚠️ 권한 거부: 파일에 쓸 수 없습니다\\n\\n파일이 Excel이나 다른 프로그램에서 열려 있을 수 있습니다.\\n파일을 닫고 다시 시도하세요.",
+        
+        # === 상태 확인 메시지 ===
+        "excel_file_not_found": "Excel 파일을 찾을 수 없습니다",
+        "permission_denied": "권한 거부: 파일이 잠겨 있거나 사용 중입니다",
+        "permission_denied_action": "⚠️ Excel 파일을 닫고 다시 시도하세요. 파일이 Excel이나 다른 프로그램에서 열려 있을 수 있습니다.",
+        "failed_to_open_excel": "Excel 열기 실패",
+        "add_missing_columns": "Excel에 누락된 열을 추가하세요.",
+        "groupname_chartname_empty": "GroupName 또는 ChartName이 비어 있습니다",
+        "fill_in_names": "이름을 입력하세요.",
+        "missing_target_ucl_lcl": "Target/UCL/LCL 누락",
+        "fields_mandatory": "이 필드는 필수입니다.",
+        "lcl_greater_ucl": "논리 오류: LCL > UCL",
+        "lcl_must_le_ucl": "LCL은 UCL보다 작거나 같아야 합니다.",
+        "non_numeric_limits": "관리 한계가 숫자가 아닙니다",
+        "ensure_limits_numbers": "한계가 숫자인지 확인하세요.",
+        "invalid_characteristic": "잘못된 Characteristic",
+        "use_nominal_smaller_bigger": "Nominal, Smaller 또는 Bigger를 사용하세요.",
+        "nominal_requires_usl_lsl": "Nominal은 USL과 LSL이 필요합니다",
+        "fill_both_usl_lsl": "USL과 LSL을 모두 입력하세요.",
+        "logic_lsl_greater_usl": "논리 오류: LSL > USL",
+        "lsl_must_le_usl": "LSL은 USL보다 작거나 같아야 합니다.",
+        "smaller_requires_usl": "Smaller는 USL이 필요합니다",
+        "fill_usl": "USL을 입력하세요.",
+        "bigger_requires_lsl": "Bigger는 LSL이 필요합니다",
+        "fill_lsl": "LSL을 입력하세요.",
+        "file_not_found_msg": "파일을 찾을 수 없습니다",
+        "expected_csv": "예상 파일",
+        "ensure_in_input": "파일이 'input/raw_charts'에 있는지 확인하세요.",
+        "empty_csv_file": "CSV 파일이 비어 있습니다",
+        "no_data_rows": "CSV에 데이터 행이 없습니다.",
+        "no_point_val_column": "'point_val' 열 누락",
+        "check_csv_header": "CSV 헤더를 확인하세요.",
+        "no_point_time_column": "'point_time' 열 누락",
+        "time_format_error": "시간 형식 오류",
+        "cannot_parse_datetime": "날짜/시간으로 파싱할 수 없습니다.",
+        "partial_invalid_times": "일부 시간이 잘못되었습니다",
+        "some_times_invalid": "일부 시간 값을 파싱할 수 없습니다. NaT/빈 값/잘못된 형식이 있는지 확인하세요.",
+        "permission_denied_csv": "권한 거부: 파일이 잠겨 있거나 사용 중입니다",
+        "close_csv_file": "⚠️ 이 CSV 파일이 Excel이나 다른 프로그램에서 열려 있다면 닫으세요.",
+        "file_corrupted": "파일이 손상되었거나 읽을 수 없습니다.",
+        "all_checks_passed": "모든 확인 통과",
+        "csv_ready": "CSV 파일을 처리할 준비가 되었습니다.",
+        
+        # 작업 메시지 (행 번호 자리 표시자 포함)
+        "check_excel_row_groupname_chartname": "Excel {row}행을 확인하세요: GroupName과 ChartName은 필수입니다.",
+        "check_excel_row_target_ucl_lcl": "Excel {row}행을 확인하세요: Target, UCL, LCL은 필수입니다.",
+        "check_excel_row_lcl_ucl": "Excel {row}행을 확인하세요: LCL은 UCL을 초과할 수 없습니다.",
+        "check_excel_row_lsl_usl": "Excel {row}행을 확인하세요: LSL은 USL을 초과할 수 없습니다.",
+        "check_excel_row_numeric": "Excel {row}행을 확인하세요: 관리 한계는 숫자여야 합니다.",
+        "check_excel_row_characteristics": "Excel {row}행을 확인하세요: Characteristics는 Nominal, Smaller 또는 Bigger여야 합니다.",
+        "check_excel_row_nominal": "Excel {row}행을 확인하세요: Nominal 유형은 USL과 LSL이 모두 필요합니다.",
+        "check_excel_row_smaller": "Excel {row}행을 확인하세요: Smaller 유형은 USL이 필요합니다.",
+        "check_excel_row_bigger": "Excel {row}행을 확인하세요: Bigger 유형은 LSL이 필요합니다.",
+        "check_excel_row_logic_nominal": "Excel {row}행을 확인하세요: USL >= UCL >= Target >= LCL >= LSL을 만족해야 합니다.",
+        "check_excel_row_logic_smaller": "Excel {row}행을 확인하세요: Smaller 유형은 USL >= UCL >= Target >= LCL을 만족해야 합니다.",
+        "check_excel_row_logic_bigger": "Excel {row}행을 확인하세요: Bigger 유형은 UCL >= Target >= LCL >= LSL을 만족해야 합니다.",
+        "csv_empty_file": "CSV 파일에 데이터가 없습니다.",
+        "csv_missing_point_val": "CSV 파일에 'point_val' 열이 없습니다.",
+        "csv_missing_point_time": "CSV 파일에 'point_time' 열이 없습니다.",
+        "csv_time_format_error": "시간 형식 오류. 올바른 형식은 '%Y/%m/%d %H:%M'입니다.",
+        "csv_partial_invalid_times": "일부 시간 값이 잘못되었습니다.",
+        "csv_permission_denied": "⚠️ 파일이 잠겨 있거나 사용 중입니다. 이 CSV 파일을 닫으세요.",
+        "csv_read_error": "파일 읽기 오류, 손상되었을 수 있습니다.",
+        "diagnosis": "🔍 진단",
+        "csv_files_not_found": "CSV 파일을 찾을 수 없습니다",
+        "likely_wrong_path": "⚠️ 가능한 원인: 잘못된 raw_data_dir 경로 또는 잘못된 파일 이름. 'input/raw_charts' 폴더 위치를 확인하고 파일이 'GroupName_ChartName.csv' 형식을 따르는지 확인하세요.",
+        "csv_found_but_errors": "모든 CSV 파일을 찾았지만 오류가 있습니다",
+        "csv_content_issue": "⚠️ 가능한 원인: CSV 내용 문제. 'point_val' 및 'point_time' 열이 존재하고 시간 형식이 '%Y/%m/%d %H:%M'인지 확인하세요.",
+        "excel_config_errors": "행에 Excel 구성 오류가 있습니다",
+        "fix_excel_first": "⚠️ 가능한 원인: AllChartInfo Excel에 누락/잘못된 값이 있습니다. CSV 확인을 진행하기 전에 먼저 Excel 구성을 수정하세요.",
+        "unexpected_crash": "예기치 않은 충돌",
+        "contact_developer": "개발자에게 문의하세요.",
+        
+        # === 전처리 ===
+        "preprocessing_chart_types": "차트 데이터 유형 전처리",
+        "preprocessing_complete_starting_charts": "데이터 유형 전처리 완료, 차트 처리 시작...",
     }
 
 

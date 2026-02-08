@@ -1083,22 +1083,30 @@ class SPCCpkDashboard(QtWidgets.QWidget):
 
     # === 重新計算 ===
     def recalculate(self):
+        from translations import tr
         print("[DEBUG] recalculate called")
         
         # 1. 設定路徑
         chart_excel_path = os.path.join(get_app_dir(), 'input', 'All_Chart_Information.xlsx')
         
-        # 2. 載入 Excel (直接使用上面 import 的 oob_module)
+        # 2. 載入 Excel 
         try:
-            # 這裡直接用 oob_module，不用再寫一堆 try...except import
             self.all_charts_info = oob_module.load_chart_information(chart_excel_path)
-            if self.all_charts_info is None:
-                raise ValueError("Excel 返回內容為空")
+            if self.all_charts_info is None or self.all_charts_info.empty:
+                raise ValueError("Excel 返回內容為空或無法讀取")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"無法讀取 Chart 設定檔: {e}")
             return
 
-        # 3. 更新下拉選單 (直接清除 Select Chart，選中第一筆)
+        # --- 新增：進度條初始化 ---
+        total_charts = len(self.all_charts_info)
+        progress = QtWidgets.QProgressDialog(tr('running_analysis'), tr('cancel'), 0, total_charts, self)
+        progress.setWindowTitle(tr('processing'))
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)  # 立即顯示
+        progress.setValue(0)
+
+        # 3. 更新下拉選單
         self.chart_combo.blockSignals(True)
         self.chart_combo.clear()
         for _, info in self.all_charts_info.iterrows():
@@ -1112,35 +1120,48 @@ class SPCCpkDashboard(QtWidgets.QWidget):
 
         # 5. 載入所有圖表的 raw data 並計算初始 Cpk
         raw_data_dir = os.path.join(get_app_dir(), 'input', 'raw_charts')
-        for _, chart_info in self.all_charts_info.iterrows():
-            if not isinstance(chart_info, pd.Series):
-                continue
-            group_name = str(chart_info['GroupName'])
-            chart_name = str(chart_info['ChartName'])
-            raw_path = oob_module.find_matching_file(raw_data_dir, group_name, chart_name)
+        
+        for idx, (_, chart_info) in enumerate(self.all_charts_info.iterrows()):
+            # --- 新增：更新進度條數值與文字 ---
+            if progress.wasCanceled():
+                break
+            
+            g_name = str(chart_info['GroupName'])
+            c_name = str(chart_info['ChartName'])
+            progress.setLabelText(f"{tr('loading_data')}: {g_name} - {c_name}")
+            progress.setValue(idx)
+            # 強制 UI 刷新，避免畫面卡死
+            QtWidgets.QApplication.processEvents()
+
+            raw_path = oob_module.find_matching_file(raw_data_dir, g_name, c_name)
             if raw_path and os.path.exists(raw_path):
                 try:
                     raw_df = pd.read_csv(raw_path)
+                    # 過濾超規點邏輯保持不變
                     usl = chart_info.get('USL', None)
                     lsl = chart_info.get('LSL', None)
-                    # 過濾超規點
                     if usl is not None and lsl is not None:
                         raw_df = raw_df[(raw_df['point_val'] <= usl) & (raw_df['point_val'] >= lsl)]
                     elif usl is not None:
                         raw_df = raw_df[raw_df['point_val'] <= usl]
                     elif lsl is not None:
                         raw_df = raw_df[raw_df['point_val'] >= lsl]
-                    self.raw_charts_dict[(group_name, chart_name)] = raw_df
+                    
+                    self.raw_charts_dict[(g_name, c_name)] = raw_df
                     quick_cpk = calculate_cpk(raw_df, chart_info)['Cpk']
-                    self.cpk_results[(group_name, chart_name)] = {'Cpk': quick_cpk}
-                    self.chart_date_states[(group_name, chart_name)] = {'custom': False, 'start': None, 'end': None}
+                    self.cpk_results[(g_name, c_name)] = {'Cpk': quick_cpk}
+                    self.chart_date_states[(g_name, c_name)] = {'custom': False, 'start': None, 'end': None}
                 except Exception as e:
-                    self.raw_charts_dict[(group_name, chart_name)] = None
-                    self.cpk_results[(group_name, chart_name)] = {'Cpk': None}
-                    print(f"[ERROR] raw chart 載入失敗 {group_name}/{chart_name}: {e}")
+                    self.raw_charts_dict[(g_name, c_name)] = None
+                    self.cpk_results[(g_name, c_name)] = {'Cpk': None}
+                    print(f"[ERROR] raw chart 載入失敗 {g_name}/{c_name}: {e}")
             else:
-                self.raw_charts_dict[(group_name, chart_name)] = None
-                self.cpk_results[(group_name, chart_name)] = {'Cpk': None}
+                self.raw_charts_dict[(g_name, c_name)] = None
+                self.cpk_results[(g_name, c_name)] = {'Cpk': None}
+
+        # --- 新增：完成進度條 ---
+        progress.setValue(total_charts)
+        progress.close()
 
         # 6. 自動觸發第一張圖表的分析
         if self.chart_combo.count() > 0:
@@ -1701,12 +1722,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             self.canvas.draw()
 
     def _draw_analysis_plots(self, df, chart_info, shared_ylim):
-        """繪製下方兩張工具分析圖（Boxplot 與 Q-Q Plot）
-        
-        Args:
-            df: 過濾後的數據 DataFrame
-            chart_info: 圖表配置資訊
-            shared_ylim: 從主圖傳遞的統一 Y 軸範圍 (y_min, y_max)
+        """
+        優化版：下方兩張小圖獨立 Scale，不再受大圖的 USL/LSL 限制而縮小
         """
         import scipy.stats as stats
         import pandas as pd
@@ -1715,84 +1732,77 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         self.fig_sub2.clear()
         self.fig_sub3.clear()
 
-        # 自動偵測 Tool 欄位名稱
-        tool_col = next((c for c in ['ByTool', 'tool_id', 'TOOL_ID', 'Tool', 'Machine', 'EQP_ID', '機台'] if c in df.columns), None)
+        # 1. 自動偵測 Tool 欄位
+        tool_col = next((c for c in ['ByTool', 'tool_id', '機台'] if c in df.columns), None)
+        # 統一顏色調色盤 (與大圖分色邏輯一致)
+        colors = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed']
 
         if df is not None and not df.empty and tool_col:
-            # 資料預處理
             df_plot = df.copy()
             df_plot['point_val'] = pd.to_numeric(df_plot['point_val'], errors='coerce')
             df_plot = df_plot.dropna(subset=['point_val'])
-            
-            # 過濾掉 NaN 的 Tool 資料
             df_plot = df_plot[pd.notna(df_plot[tool_col])].copy()
             
-            if df_plot.empty:
-                # 若過濾後無數據則顯示空白提示
-                for fig in [self.fig_sub2, self.fig_sub3]:
-                    ax = fig.add_subplot(111)
-                    ax.text(0.5, 0.5, "No Tool Info Found", ha='center', va='center')
-                return
-            
-            tools = sorted(df_plot[tool_col].unique())
-            colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#0891b2']
-            tool_colors = {t: colors[i % len(colors)] for i, t in enumerate(tools)}
+            if not df_plot.empty:
+                tools = sorted(df_plot[tool_col].unique())
+                tool_colors = {t: colors[i % len(colors)] for i, t in enumerate(tools)}
 
-            # --- 圖 2: 精美 Boxplot（填充色 + 抖動點）---
-            ax2 = self.fig_sub2.add_subplot(111)
-            ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
-            ax2.set_ylabel("Measured Value", fontsize=8)
-            
-            # 準備數據
-            data_to_plot = [df_plot[df_plot[tool_col] == t]['point_val'].values for t in tools]
-            
-            # 繪製箱線圖（使用 patch_artist 填充顏色）
-            bp = ax2.boxplot(data_to_plot, labels=[str(t) for t in tools], 
-                             patch_artist=True, widths=0.6,
-                             showfliers=False,  # 不顯示異常值標記（改用抖動點）
-                             medianprops={'color': 'white', 'linewidth': 1.5},
-                             whiskerprops={'color': '#4b5563', 'linewidth': 1},
-                             capprops={'color': '#4b5563', 'linewidth': 1})
-            
-            # 為每個箱體填充顏色並加入抖動點
-            for i, (box, tool) in enumerate(zip(bp['boxes'], tools)):
-                color = colors[i % len(colors)]
-                box.set(facecolor=color, alpha=0.7, edgecolor=color)
+                # --- 核心邏輯：計算這兩張圖專用的 Y 軸範圍 ---
+                y_min_local = df_plot['point_val'].min()
+                y_max_local = df_plot['point_val'].max()
+                y_range = y_max_local - y_min_local
+                # 給予 10% 的上下留白，讓圖表不會頂到邊框
+                margin = y_range * 0.1 if y_range > 0 else 1.0
+                analysis_ylim = (y_min_local - margin, y_max_local + margin)
+
+                # --- 圖 2: Boxplot ---
+                ax2 = self.fig_sub2.add_subplot(111)
+                ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
                 
-                # 加入抖動點 (Jitter) 增加美感與數據密度可視化
-                vals = data_to_plot[i]
-                x_jitter = np.random.normal(i + 1, 0.04, size=len(vals))
-                ax2.scatter(x_jitter, vals, alpha=0.4, color=color, s=10, zorder=3)
+                data_to_plot = [df_plot[df_plot[tool_col] == t]['point_val'].values for t in tools]
+                
+                bp = ax2.boxplot(data_to_plot, labels=[str(t) for t in tools], 
+                                 patch_artist=True, widths=0.5, showfliers=False,
+                                 medianprops={'color': 'white', 'linewidth': 1.5})
+                
+                # 填充顏色與抖動點
+                for i, box in enumerate(bp['boxes']):
+                    color = colors[i % len(colors)]
+                    box.set(facecolor=color, alpha=0.7)
+                    # 加入抖動點增加密度感
+                    vals = data_to_plot[i]
+                    x_jitter = np.random.normal(i + 1, 0.04, size=len(vals))
+                    ax2.scatter(x_jitter, vals, alpha=0.3, color=color, s=8, zorder=3)
 
-            # 套用統一的 Y 軸範圍
-            ax2.set_ylim(shared_ylim)
-            ax2.grid(True, axis='y', linestyle=':', alpha=0.4)
-            ax2.tick_params(labelsize=8)
-            # 設置 X 軸標籤旋轉
-            for label in ax2.get_xticklabels():
-                label.set_rotation(90)
-                label.set_ha('right')
+                ax2.set_ylim(analysis_ylim)
+                ax2.grid(True, axis='y', linestyle=':', alpha=0.4)
 
-            # --- 圖 3: Normal Probability Plot (Q-Q 圖) ---
-            ax3 = self.fig_sub3.add_subplot(111)
-            ax3.set_title("Normal Probability Plot", fontsize=10, fontweight='bold', pad=10)
-            ax3.set_xlabel("Theoretical Quantiles (σ)", fontsize=8)
-            ax3.set_ylabel("Sample Quantiles (Value)", fontsize=8)
+                # --- 圖 3: Normal Probability Plot (重點修正 n<4 判斷) ---
+                ax3 = self.fig_sub3.add_subplot(111)
+                ax3.set_title("Normal Probability Plot", fontsize=10, fontweight='bold', pad=10)
+                
+                has_valid_qq = False
+                for i, t in enumerate(tools):
+                    tool_data = df_plot[df_plot[tool_col] == t]['point_val']
+                    # 統計學門檻：n < 4 畫圖無意義，跳過
+                    if len(tool_data) >= 4:
+                        (osm, osr), (slope, intercept, r) = stats.probplot(tool_data, dist="norm")
+                        ax3.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.8, label=str(t))
+                        ax3.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.5, linewidth=1)
+                        has_valid_qq = True
 
-            for t in tools:
-                tool_data = df_plot[df_plot[tool_col] == t]['point_val']
-                if len(tool_data) > 3:
-                    (osm, osr), (slope, intercept, r) = stats.probplot(tool_data, dist="norm")
-                    # 繪製實測點
-                    ax3.scatter(osm, osr, color=tool_colors[t], s=15, alpha=0.8, label=str(t), edgecolors='none')
-                    # 繪製常態分佈基準線（直線）
-                    ax3.plot(osm, slope*osm + intercept, color=tool_colors[t], alpha=0.8, linewidth=1)
+                ax3.set_ylim(analysis_ylim)  # 與 Boxplot 共用當前資料的 Scale
+                if has_valid_qq:
+                    ax3.legend(fontsize=7, loc='upper left', ncol=2, frameon=True)
+                
+                ax3.grid(True, linestyle=':', alpha=0.4)
             
-            # 套用統一的 Y 軸範圍
-            ax3.set_ylim(shared_ylim)
-            ax3.legend(fontsize=7, loc='upper left', ncol=4)
-            ax3.grid(True, linestyle=':', alpha=0.4)
-            ax3.tick_params(labelsize=8)
+            # 調整下方邊距確保 Label 不會被擋住
+            self.fig_sub2.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
+            self.fig_sub3.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
+            
+            self.canvas_sub2.draw()
+            self.canvas_sub3.draw()
         else:
             # 若無 Tool 資訊，兩張圖都只顯示文字提示
             ax2 = self.fig_sub2.add_subplot(111)
@@ -1807,12 +1817,12 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             ax3.set_xticks([])
             ax3.set_yticks([])
 
-        # 最終佈局調整：確保 Title 和 Label 不會被裁切
-        self.fig_sub2.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
-        self.fig_sub3.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
-        
-        self.canvas_sub2.draw()
-        self.canvas_sub3.draw()
+            # 最終佈局調整：確保 Title 和 Label 不會被裁切
+            self.fig_sub2.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
+            self.fig_sub3.subplots_adjust(left=0.18, bottom=0.25, right=0.95, top=0.85)
+            
+            self.canvas_sub2.draw()
+            self.canvas_sub3.draw()
 
     def prev_chart(self):
         """切換到上一張圖表"""

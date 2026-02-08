@@ -1280,35 +1280,30 @@ def trending(raw_df, weekly_start_date, weekly_end_date, baseline_start_date, ba
     baseline_start_date = pd.to_datetime(baseline_start_date)
     baseline_end_date = pd.to_datetime(baseline_end_date)
 
-    # 每週資料的摘要
-    weekly_summary = []
-    current_end = weekly_end_date
-    week_count = 0
-
-    while week_count < 7:
-        current_start = current_end - timedelta(days=6)
-        week_data = raw_df[
-            (raw_df['point_time'] >= current_start) &
-            (raw_df['point_time'] <= current_end)
-        ]['point_val']
-
-        weekly_summary.append({
-            'week_start': current_start,
-            'week_end': current_end,
-            'median': week_data.median() if not week_data.empty else np.nan,
-            'count': len(week_data)
-        })
-
-        current_end = current_start - timedelta(days=1)
-        week_count += 1
-
-    weekly_data = pd.DataFrame(weekly_summary)
-
-    if weekly_data.empty:
+    # [優化] 預過濾 49 天窗口（7週 × 7天）一次性獲取所有需要的數據
+    window_start = weekly_end_date - timedelta(days=48)  # 包含最後一天，所以是48
+    weekly_window_df = raw_df[
+        (raw_df['point_time'] >= window_start) &
+        (raw_df['point_time'] <= weekly_end_date)
+    ].copy()
+    
+    if weekly_window_df.empty:
         return 'NO_HIGHLIGHT'
-
-    weekly_medians = weekly_data['median'].tolist()
-    weekly_counts = weekly_data['count'].tolist()
+    
+    # [優化] 使用 floor division 計算每個數據點屬於哪一週（相對於 weekly_end_date）
+    # week_id = 0 表示最近一週，week_id = 6 表示第7週（最早）
+    days_from_end = (weekly_end_date - weekly_window_df['point_time']).dt.days
+    weekly_window_df['week_id'] = (days_from_end // 7).clip(upper=6)
+    
+    # [優化] 一次性分組計算所有週的統計數據
+    weekly_grouped = weekly_window_df.groupby('week_id')['point_val'].agg(['median', 'count'])
+    
+    # [重要] 使用 reindex 確保所有 7 週都存在，即使沒有數據（填充 NaN 和 0）
+    weekly_grouped = weekly_grouped.reindex(range(7), fill_value={'median': np.nan, 'count': 0})
+    
+    # 提取列表（保持原始順序：week_id 0 = 最新週）
+    weekly_medians = weekly_grouped['median'].tolist()
+    weekly_counts = weekly_grouped['count'].fillna(0).astype(int).tolist()
 
     # 檢查最近幾週的資料點數條件
     def check_weeks_condition(weeks_counts):
@@ -3353,7 +3348,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.left_menu_layout.setSpacing(15) # 選單項目間距
 
         # 語言切換按鈕（在最上方）
-        self.lang_button = QtWidgets.QPushButton("中 / EN")
+        self.lang_button = QtWidgets.QPushButton(tr("lang_button"))
         self.lang_button.setFixedHeight(32)
         self.lang_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.lang_button.setStyleSheet("""
@@ -3726,6 +3721,9 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         if hasattr(self, 'tool_matching_page') and hasattr(self.tool_matching_page, 'refresh_ui_texts'):
             self.tool_matching_page.refresh_ui_texts()
+        
+        if hasattr(self, 'data_check_page') and hasattr(self.data_check_page, 'refresh_ui_texts'):
+            self.data_check_page.refresh_ui_texts()
         
         print(f"UI texts refreshed to {self.translator.current_lang}")
 

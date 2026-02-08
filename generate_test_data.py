@@ -292,6 +292,14 @@ def generate_test_charts():
         dates = [start_date + timedelta(days=random.randint(0, 730)) for _ in range(n_samples)]
         dates.sort()
         
+        # --- 新增 ByTool 邏輯 ---
+        # 隨機決定這張 Chart 是由哪幾台 Tool 生產的 (假設每張圖表由 2~4 台機器輪替)
+        num_tools = random.randint(2, 4)
+        available_tools = [f"TOOL_{random.randint(101, 150):03d}" for _ in range(num_tools)]
+        
+        # 為每一筆數據隨機指派一個機台 (也可以用循環指派，這裡採隨機指派模擬真實輪替)
+        tools_col = [random.choice(available_tools) for _ in range(n_samples)]
+        
         batch_ids = []
         for date in dates:
             date_str = date.strftime('%Y%m%d')
@@ -302,8 +310,10 @@ def generate_test_charts():
         csv_data = pd.DataFrame({
             'point_time': dates,
             'point_val': data,
-            'Batch_ID': batch_ids
+            'Batch_ID': batch_ids,
+            'ByTool': tools_col  # 新增的機台欄位
         })
+        # -----------------------
         
         os.makedirs('input/raw_charts', exist_ok=True)
         csv_filename = f"input/raw_charts/{chart_info['GroupName']}_{chart_info['ChartName']}.csv"
