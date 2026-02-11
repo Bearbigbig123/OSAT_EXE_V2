@@ -26,7 +26,15 @@ from PyQt6.QtCore import QDateTime
 from PyQt6.QtWidgets import QMessageBox, QLabel, QVBoxLayout, QScrollArea, QGridLayout, QPushButton, QDateTimeEdit, QDateEdit, QHBoxLayout
 from PIL import Image
 from PIL.ImageQt import ImageQt
-plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS', 'Noto Sans CJK TC']
+plt.rcParams['font.sans-serif'] = [
+    'Malgun Gothic',          # Windows 韓文
+    'AppleGothic',           # Mac 韓文
+    'NanumGothic',           # 常見開源韓文
+    'Microsoft JhengHei',    # 微軟正黑體
+    'SimHei', 
+    'Arial Unicode MS', 
+    'Noto Sans CJK TC'
+]
 plt.rcParams['axes.unicode_minus'] = False  # 正確顯示負號
 
 # 定義全域繪圖樣式
@@ -401,15 +409,15 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.cancel_btn.setText(tr("cancel"))
         self.ok_btn.setText(tr("save"))
 
-# 統一的字體設置函數 - 支持中文（微軟正黑體）
+# 統一的字體設置函數 - 支持中文（微軟正黑體）和韓文
 def get_app_font(size=9, weight=QtGui.QFont.Weight.Normal):
     """
     返回統一的應用程序字體
-    字體優先級：Segoe UI (英文) -> Microsoft JhengHei (繁體中文)
+    字體優先級：Segoe UI (英文) -> Malgun Gothic (韓文) -> Microsoft JhengHei (繁體中文)
     """
     font = QtGui.QFont()
-    # 設置字體家族列表
-    font.setFamilies(["Segoe UI", "Microsoft JhengHei", "sans-serif"])
+    # 設置字體家族列表，加入韓文支援
+    font.setFamilies(["Segoe UI", "Malgun Gothic", "Microsoft JhengHei", "sans-serif"])
     font.setPointSize(size)
     font.setWeight(weight)
     return font
@@ -792,13 +800,13 @@ def review_kshift_results(results, resolution, characteristic, data_percentiles,
             # 沒填寫 resolution: 只要有差異就算顯著
             is_significant_diff = not pd.isna(abs_diff)
 
-        # 判斷 K 絕對值是否超過 2 (且非NaN)
-        is_significant_k = not pd.isna(k_value) and abs(k_value) > 2
+        # 判斷 K 絕對值是否超過 1.67 (且非NaN)
+        is_significant_k = not pd.isna(k_value) and abs(k_value) > 1.67
 
         # 新增判斷 k_value 是否為無限值
         is_infinite_k = not pd.isna(k_value) and np.isinf(abs(k_value))
 
-        # 設定初始高亮: 絕對差值 > resolution 且 (K絕對值 > 2 或 K絕對值為無限)
+        # 設定初始高亮: 絕對差值 > resolution 且 (K絕對值 > 1.67 或 K絕對值為無限)
         if is_significant_diff and (is_significant_k or is_infinite_k):  # 使用 AND 和 OR 結合邏輯
             highlight_conditions[f'{percentile}_shift'] = 'HIGHLIGHT'   
 
@@ -1299,7 +1307,8 @@ def trending(raw_df, weekly_start_date, weekly_end_date, baseline_start_date, ba
     weekly_grouped = weekly_window_df.groupby('week_id')['point_val'].agg(['median', 'count'])
     
     # [重要] 使用 reindex 確保所有 7 週都存在，即使沒有數據（填充 NaN 和 0）
-    weekly_grouped = weekly_grouped.reindex(range(7), fill_value={'median': np.nan, 'count': 0})
+    weekly_grouped = weekly_grouped.reindex(range(7))  # 預設就是補 NaN
+    weekly_grouped['count'] = weekly_grouped['count'].fillna(0)
     
     # 提取列表（保持原始順序：week_id 0 = 最新週）
     weekly_medians = weekly_grouped['median'].tolist()

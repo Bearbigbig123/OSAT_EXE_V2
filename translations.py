@@ -888,9 +888,9 @@ class Translations:
         # === 메인 메뉴 ===
         "home": "홈",
         "split_data": "데이터 분할",
-        "oob_spc_system": "OOB / SPC 분석 시스템",
-        "cpk_calculator": "Cpk 대시보드",
-        "tool_matching": "장비 일치성 분석",
+        "oob_spc_system": "OOB / SPC 시스템",
+        "cpk_calculator": "Cpk 계산",
+        "tool_matching": "장비 분석",
         "cl_tighten": "관리선 계산",
         
         # === 언어 ===
@@ -1004,7 +1004,7 @@ class Translations:
         "status": "상태",
         
         # === 장비 매칭 ===
-        "tool_matching_title": "장비 매칭",
+        "tool_matching_title": "장비 분석",
         "browse_files_with_icon": "📁 파일 찾아보기...",
         "example_button": "💾 예제",
         "formula_explanation": "공식 설명",
@@ -1110,7 +1110,7 @@ class Translations:
         "please_select_csv": "CSV 파일을 선택하세요...",
         
         # === CL 강화 ===
-        "calculation_range": "계산 구간:",
+        "calculation_range": "조회 기간:",
         "chart_list": "차트 목록",
         "search_placeholder": "차트 검색...",
         "chart_details": "차트 세부 정보",
