@@ -236,7 +236,7 @@ def generate_test_charts():
     
     charts_info = []
     
-    for i in range(1000):
+    for i in range(100):
         pattern = random.choice(patterns)
         sample_range = random.choice(sample_ranges)
         n_samples = random.randint(sample_range[0], sample_range[1])
@@ -311,7 +311,7 @@ def generate_test_charts():
             'point_time': dates,
             'point_val': data,
             'Batch_ID': batch_ids,
-            'ByTool': tools_col  # 新增的機台欄位
+            'Matching': tools_col  # 新增的機台欄位
         })
         # -----------------------
         

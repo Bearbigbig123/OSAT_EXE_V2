@@ -539,7 +539,7 @@ def preprocess_raw_df(raw_df):
     import numpy as np
     import pandas as pd
     raw_df.replace([np.inf, -np.inf, 'na', 'NA', 'NaN', 'nan'], np.nan, inplace=True)
-    required_columns = ['GroupName', 'ChartName', 'point_val', 'Batch_ID', 'point_time', 'ByTool']
+    required_columns = ['GroupName', 'ChartName', 'point_val', 'Batch_ID', 'point_time', 'Matching']
     missing_columns = [col for col in required_columns if col not in raw_df.columns]
     if missing_columns:
         raise ValueError(f"原始數據缺少的欄位: {missing_columns}")
@@ -549,7 +549,7 @@ def preprocess_raw_df(raw_df):
         'point_val': 'float',
         'Batch_ID': 'str',
         'point_time': 'str',
-        'ByTool': 'str'
+        'Matching': 'str'
     }
     return raw_df.astype(column_types)
 
@@ -632,9 +632,9 @@ def preprocess_data(chart_info, raw_df):
         columns_to_keep = ['point_val', 'point_time']
         if 'Batch_ID' in raw_df.columns:
             columns_to_keep.append('Batch_ID')
-        # ⚠️ 確保 ByTool 欄位不會在預處理時遺失
-        if 'ByTool' in raw_df.columns:
-            columns_to_keep.append('ByTool')
+        # ⚠️ 確保 Matching 欄位不會在預處理時遺失
+        if 'Matching' in raw_df.columns:
+            columns_to_keep.append('Matching')
         raw_df = raw_df[columns_to_keep]
         
         
@@ -2149,7 +2149,7 @@ def add_right_cl_labels(ax, chart_info, x_pos=None):
     在圖表右側添加 UCL/Target/LCL 標籤
     """
     if x_pos is None:
-        x_pos = 1.002
+        x_pos = 1
     labels = [
         (chart_info['UCL'], 'UCL', '#E83F6F'),
         (chart_info['Target'], 'Target', '#087E8B'),
@@ -2179,7 +2179,7 @@ def setup_unified_tooltip(ax, canvas, line_artists, df_source, tool_color_map=No
             active_bars[id(sel)] = v_bar
             
             time_str = pd.to_datetime(row['point_time']).strftime("%Y-%m-%d %H:%M")
-            tooltip_text = (f"Tool: {row.get('ByTool', 'N/A')}\n"
+            tooltip_text = (f"Tool: {row.get('Matching', 'N/A')}\n"
                             f"Batch: {row.get('Batch_ID', 'N/A')}\n"
                             f"Time: {time_str}\n"
                             f"Value: {row['point_val']:.3f}")
@@ -2447,140 +2447,121 @@ def plot_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end
     
 
 def plot_spc_by_tool_color(raw_df, chart_info, weekly_start_date, weekly_end_date, oob_info="N/A"):
-    """
-    Total SPC (By Tool 標記顏色)
-    恢復連接線,統一 Tooltip 風格
-    """
-    import numpy as np
     import pandas as pd
     import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
-    fig = Figure(figsize=(10, 3))
+    # 強制對齊畫布尺寸 (13, 2.5)
+    fig = Figure(figsize=(13, 2.5))
     ax = fig.add_subplot(111)
-    ax.tick_params(axis='both', which='major', labelsize=7)
+    
+    # 統一刻度字體大小
+    ax.tick_params(axis='both', which='major', labelsize=PLOT_STYLE['tick'])
 
-    # 準備數據
     df = raw_df.copy()
     df['point_time'] = pd.to_datetime(df['point_time'])
     df = df.sort_values('point_time').reset_index(drop=True)
     
-    # 檢查必要欄位
-    if 'ByTool' not in df.columns:
-        df['ByTool'] = 'Unknown'
-    df['ByTool'] = df['ByTool'].fillna('Unknown').astype(str)
+    if 'Matching' not in df.columns: df['Matching'] = 'Unknown'
+    df['Matching'] = df['Matching'].fillna('Unknown').astype(str)
 
-    # 建立顏色映射
-    unique_tools = sorted(df['ByTool'].unique())
+    unique_tools = sorted(df['Matching'].unique())
     colors = list(mcolors.TABLEAU_COLORS.values())
     tool_color_map = {tool: colors[i % len(colors)] for i, tool in enumerate(unique_tools)}
 
-    # 1. 先畫背景底色 (zorder -1)
     add_spc_background_zones(ax, df, weekly_start_date, weekly_end_date)
+    ax.plot(df.index, df['point_val'], color="#696969", alpha=0.3, zorder=1)
 
-    # 2. 畫連接線 (zorder 1)
-    ax.plot(df.index, df['point_val'], color="#696969", alpha=0.4, zorder=1)
-
-    # 3. 分機台畫點 (收集 artists 用於 tooltip)
     artists = []
     for tool in unique_tools:
-        subset = df[df['ByTool'] == tool]
-        # 使用點繪製，zorder 設高於線
+        subset = df[df['Matching'] == tool]
         ln, = ax.plot(subset.index, subset['point_val'], marker='o', linestyle='', 
-                      color=tool_color_map[tool], label=tool, markersize=5, zorder=3)
+                      color=tool_color_map[tool], label=tool, markersize=4, zorder=3)
         artists.append(ln)
 
-    # 統一標題
+    # X 軸時間間距對齊
+    interval = max(1, len(df) // 30)
+    ax.set_xticks(df.index[::interval])
+    ax.set_xticklabels(df['point_time'].dt.strftime("%m/%d %H:%M")[::interval], 
+                       rotation=90, fontsize=PLOT_STYLE['tick'])
+    
+    # 統一標題字體大小
     unified_title = get_unified_title(chart_info)
     ax.set_title(f"{unified_title}\nBy Tool Comparison", loc='left', fontsize=PLOT_STYLE['title'])
     
-    # Legend 移至左上角
-    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=4)
-    
-    # 控制線與標籤
+    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=5)
     ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']], 
-              -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', zorder=2)
+              -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', alpha=0.5)
     add_right_cl_labels(ax, chart_info)
-
-    # 套用統一 Tooltip
-    canvas = FigureCanvas(fig)
-    # 傳入 artists 列表與對應的排序後的 df
-    setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
     
-    # 美化
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
     
-    fig.subplots_adjust(left=0.08, right=0.92, top=0.82, bottom=0.25)
+    canvas = FigureCanvas(fig)
+    setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
+    
+    # 強制對齊邊距參數
+    fig.subplots_adjust(left=0.06, right=0.92, top=0.82, bottom=0.28)
+    
     canvas._plot_args = (raw_df.copy(), chart_info.copy(), weekly_start_date, weekly_end_date, oob_info)
     canvas._plot_kind = 'spc_by_tool'
     return canvas
 
 
 def plot_spc_by_tool_group(raw_df, chart_info, oob_info="N/A"):
-    """
-    Total SPC (By Tool 水平分組)
-    保留機台間隔線,統一 Tooltip 風格
-    """
-    import numpy as np
     import pandas as pd
     import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
-    fig = Figure(figsize=(10, 3))
+    # 強制對齊畫布尺寸 (13, 2.5)
+    fig = Figure(figsize=(13, 2.5))
     ax = fig.add_subplot(111)
-    ax.tick_params(axis='both', which='major', labelsize=7)
+    
+    # 統一刻度字體大小
+    ax.tick_params(axis='both', which='major', labelsize=PLOT_STYLE['tick'])
 
-    # 資料準備與排序
     df = raw_df.copy()
     df['point_time'] = pd.to_datetime(df['point_time'])
-    if 'ByTool' not in df.columns:
-        df['ByTool'] = 'Unknown'
-    df['ByTool'] = df['ByTool'].fillna('Unknown').astype(str)
-    
-    # 重要：此處排序決定了畫面上點的 X 軸順序
-    df = df.sort_values(['ByTool', 'point_time']).reset_index(drop=True)
+    if 'Matching' not in df.columns: df['Matching'] = 'Unknown'
+    df = df.sort_values(['Matching', 'point_time']).reset_index(drop=True)
 
-    # 建立顏色映射
-    unique_tools = sorted(df['ByTool'].unique())
+    unique_tools = sorted(df['Matching'].unique())
     colors = list(mcolors.TABLEAU_COLORS.values())
     tool_color_map = {tool: colors[i % len(colors)] for i, tool in enumerate(unique_tools)}
 
-    # 分群繪圖 - 繪製各組的線與點
     artists = []
     for i, tool in enumerate(unique_tools):
-        subset = df[df['ByTool'] == tool]
-        # 繪製線條與點
+        subset = df[df['Matching'] == tool]
         ln, = ax.plot(subset.index, subset['point_val'], marker='o', markersize=4,
                       color=tool_color_map[tool], label=tool, alpha=0.8, zorder=3)
         artists.append(ln)
-        
-        # 分隔線
         if i > 0:
-            ax.axvline(x=subset.index.min() - 0.5, color='gray', linestyle=':', alpha=0.3, zorder=1)
+            ax.axvline(x=subset.index.min() - 0.5, color='gray', linestyle=':', alpha=0.4, zorder=1)
 
-    # 統一標題
+    # 中間也要有時間，間距同步 (每 30 點一組標籤)
+    interval = max(1, len(df) // 30)
+    ax.set_xticks(df.index[::interval])
+    ax.set_xticklabels(df['point_time'].dt.strftime("%m/%d %H:%M")[::interval], 
+                       rotation=90, fontsize=PLOT_STYLE['tick'])
+    
+    # 統一標題字體大小使用 PLOT_STYLE['title']
     unified_title = get_unified_title(chart_info)
     ax.set_title(f"{unified_title}\nMachine Grouping Analysis", loc='left', fontsize=PLOT_STYLE['title'])
     
-    # Legend 移至左上角
-    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=4)
-    
-    # 控制線與標籤
-    ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']],
-              -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', zorder=2)
+    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=5)
+    ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']], 
+              -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', alpha=0.5)
     add_right_cl_labels(ax, chart_info)
 
-    # 套用統一 Tooltip
-    canvas = FigureCanvas(fig)
-    # 這裡的 df 已經過重新排序，且 X 座標與 df 的 iloc 索引完全對應
-    setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
-
-    # 美化
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
 
-    fig.subplots_adjust(left=0.08, right=0.92, top=0.82, bottom=0.25)
+    canvas = FigureCanvas(fig)
+    setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
+    
+    # 強制對齊邊距參數
+    fig.subplots_adjust(left=0.06, right=0.92, top=0.82, bottom=0.28)
+    
     canvas._plot_args = (df.copy(), chart_info.copy(), oob_info)
     canvas._plot_kind = 'spc_by_tool_group'
     return canvas
@@ -3399,8 +3380,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.cl_tighten_button = self._create_menu_button(tr("cl_tighten"))
         self.data_check_button = self._create_menu_button(tr("data_health_monitor"))
         self.left_menu_layout.addWidget(self.home_button)
-        self.left_menu_layout.addWidget(self.data_check_button)
         self.left_menu_layout.addWidget(self.split_data_button)
+        self.left_menu_layout.addWidget(self.data_check_button)
         self.left_menu_layout.addWidget(self.oob_system_button)
         self.left_menu_layout.addWidget(self.cpk_calculation_button)
         self.left_menu_layout.addWidget(self.tool_matching_button)
@@ -4638,16 +4619,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
             # 儲存原始處理後的資料，供 UI 在需要時繪製額外圖表
             try:
-                # 確保 'ByTool' 一定存在於儲存的 raw_df 中
-                if 'ByTool' not in raw_df.columns:
+                # 確保 'Matching' 一定存在於儲存的 raw_df 中
+                if 'Matching' not in raw_df.columns:
                     try:
-                        print("[DEBUG analyze_chart] 'ByTool' 欄位在 processed data 中缺失，將自動填入 'Unknown'")
+                        print("[DEBUG analyze_chart] 'Matching' 欄位在 processed data 中缺失，將自動填入 'Unknown'")
                         temp_df = raw_df.copy()
-                        temp_df['ByTool'] = 'Unknown'
+                        temp_df['Matching'] = 'Unknown'
                         result['raw_df'] = temp_df
                     except Exception:
                         print("[Warning analyze_chart] 無法複製 processed raw_df，直接使用引用")
-                        raw_df['ByTool'] = 'Unknown'
+                        raw_df['Matching'] = 'Unknown'
                         result['raw_df'] = raw_df
                 else:
                     result['raw_df'] = raw_df.copy()
@@ -5280,7 +5261,6 @@ class SplitDataWidget(QtWidgets.QWidget):
         
         # 更新 GroupBox 標題
         self.input_group_box.setTitle(tr('select_input_files'))
-        self.output_group_box.setTitle(tr('select_output_folder_title'))
         self.mode_group_box.setTitle(tr('select_processing_mode'))
         
         # 更新輸入框提示
@@ -5288,7 +5268,6 @@ class SplitDataWidget(QtWidgets.QWidget):
         
         # 更新按鈕
         self.input_button.setText(tr('browse'))
-        self.output_button.setText(tr('browse'))
         self.mode_label.setText(tr('select_file_type'))
         
         # 更新下拉選單
@@ -5354,29 +5333,7 @@ class SplitDataWidget(QtWidgets.QWidget):
         input_row_layout.addWidget(self.input_path_entry)
         input_row_layout.addWidget(self.input_button)
         input_layout.addRow(input_row_layout)
-        main_layout.addWidget(self.input_group_box, 1, 0, 1, 2) # Row 2, Col 0, Span 1 row, 2 columns
-
-        # --- Output folder selection block ---
-        self.output_group_box = QtWidgets.QGroupBox(tr('select_output_folder_title'))
-        output_layout = QtWidgets.QFormLayout(self.output_group_box)
-        output_layout.setContentsMargins(15, 20, 15, 15)
-        output_layout.setHorizontalSpacing(10)
-
-        self.output_folder_entry = QtWidgets.QLineEdit()
-        # self.output_folder_entry.setPlaceholderText("Split files will be saved in the 'raw_charts' subfolder under this directory...")
-        self.output_folder_entry.setReadOnly(True) # Set as read-only
-        
-        self.output_button = QtWidgets.QPushButton(tr('browse'))
-        # *** PyQt6 兼容性修正 START ***
-        # output_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
-        # *** PyQt6 兼容性修正 END ***
-        self.output_button.clicked.connect(self.select_output_folder)
-
-        output_row_layout = QtWidgets.QHBoxLayout()
-        output_row_layout.addWidget(self.output_folder_entry)
-        output_row_layout.addWidget(self.output_button)
-        output_layout.addRow(output_row_layout)
-        main_layout.addWidget(self.output_group_box, 2, 0, 1, 2) # Row 2, Col 0, Span 1 row, 2 columns
+        main_layout.addWidget(self.input_group_box, 1, 0, 1, 2) # Row 1, Col 0, Span 1 row, 2 columns
 
         # --- Processing mode selection block ---
         self.mode_group_box = QtWidgets.QGroupBox(tr('select_processing_mode'))
@@ -5409,7 +5366,7 @@ class SplitDataWidget(QtWidgets.QWidget):
 
         mode_layout.addLayout(example_buttons_layout)
 
-        main_layout.addWidget(self.mode_group_box, 3, 0, 1, 2) # Row 3, Col 0, Span 1 row, 2 columns
+        main_layout.addWidget(self.mode_group_box, 2, 0, 1, 2) # Row 2, Col 0, Span 1 row, 2 columns
 
         # --- Process button ---
         self.process_button = QtWidgets.QPushButton(tr('start_processing'))
@@ -5422,7 +5379,7 @@ class SplitDataWidget(QtWidgets.QWidget):
         button_layout.addStretch(1)
         button_layout.addWidget(self.process_button)
         button_layout.addStretch(1)
-        main_layout.addLayout(button_layout, 4, 0, 1, 2) # Row 4, Col 0, Span 1 row, 2 columns
+        main_layout.addLayout(button_layout, 3, 0, 1, 2) # Row 3, Col 0, Span 1 row, 2 columns
 
         # --- Progress bar and status message ---
         self.progress_bar = QtWidgets.QProgressBar()
@@ -5435,21 +5392,27 @@ class SplitDataWidget(QtWidgets.QWidget):
         self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #607D8B; font-style: italic;")
 
-        main_layout.addWidget(self.progress_bar, 5, 0, 1, 2) # Row 5
-        main_layout.addWidget(self.status_label, 6, 0, 1, 2) # Row 6
-        main_layout.setRowStretch(7, 1) # 將所有內容推到頂部
+        main_layout.addWidget(self.progress_bar, 4, 0, 1, 2) # Row 4
+        main_layout.addWidget(self.status_label, 5, 0, 1, 2) # Row 5
+        main_layout.setRowStretch(6, 1) # 將所有內容推到頂部
 
     def download_type2_example(self):
         import csv
         from PyQt6 import QtWidgets
-        columns = ["GroupName", "ChartName", "point_time", "Batch_ID", "point_val"]
+        columns = ["GroupName", "ChartName", "point_time", "Batch_ID", "point_val", "Matching"]
         data = [
-            ["Group1", "A", "2025/3/10 00:45", 123, 56.5],
-            ["Group1", "A", "2025/3/11 00:45", 123, 56.6],
-            ["Group1", "A", "2025/3/12 00:45", 123, 56.5],
-            ["Group1", "B", "2025/3/10 00:45", 123, 84],
-            ["Group1", "B", "2025/3/11 00:45", 123, 84.2],
-            ["Group1", "B", "2025/3/12 00:45", 123, 83.8],
+            ["Group1", "A", "2025/3/10 00:45", 123, 56.5, "Tool1"],
+            ["Group1", "A", "2025/3/11 00:45", 123, 56.6, "Tool1"],
+            ["Group1", "A", "2025/3/12 00:45", 123, 56.5, "Tool1"],
+            ["Group1", "A", "2025/3/10 00:45", 124, 56.2, "Tool2"],
+            ["Group1", "A", "2025/3/11 00:45", 124, 56.3, "Tool2"],
+            ["Group1", "A", "2025/3/12 00:45", 124, 56.1, "Tool2"],
+            ["Group1", "B", "2025/3/10 00:45", 123, 84,   "Tool1"],
+            ["Group1", "B", "2025/3/11 00:45", 123, 84.2, "Tool1"],
+            ["Group1", "B", "2025/3/12 00:45", 123, 83.8, "Tool1"],
+            ["Group1", "B", "2025/3/10 00:45", 124, 83.5, "Tool2"],
+            ["Group1", "B", "2025/3/11 00:45", 124, 83.7, "Tool2"],
+            ["Group1", "B", "2025/3/12 00:45", 124, 83.9, "Tool2"],
         ]
         save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save type2 example file", "type2_example.csv", "CSV Files (*.csv)")
         if save_path:
@@ -5460,14 +5423,17 @@ class SplitDataWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Complete", f"Saved to {save_path}")
     def download_type3_example(self):
         import csv
-        # 範例資料
+        # 範例資料：每列為一個 Chart，Matching 欄為固定資訊欄（表示工具組別）
         data = [
-            ["2025/3/10 00:45", 123, "", 56.5, 84, 123.3, 140, 0.0065, 16820, 16811, -0.11, -0.07, -0.06, 9044],
-            ["2025/3/11 00:45", 123, "", 56.6, 84.2, 124, 140, 0.0065, 16748, 16813, -0.11, -0.06, -0.03, 9065],
-            ["2025/3/12 00:45", 123, "", 56.5, 83.8, 123, 139.7, 0.0065, 16822, 16822, -0.1, -0.05, -0.13, 9030],
+            ["2025/3/10 00:45", 123, "Tool1", "", 56.5,  84,   123.3, 140,   0.0065, 16820, 16811, -0.11, -0.07, -0.06, 9044],
+            ["2025/3/11 00:45", 123, "Tool1", "", 56.6,  84.2, 124,   140,   0.0065, 16748, 16813, -0.11, -0.06, -0.03, 9065],
+            ["2025/3/12 00:45", 123, "Tool1", "", 56.5,  83.8, 123,   139.7, 0.0065, 16822, 16822, -0.1,  -0.05, -0.13, 9030],
+            ["2025/3/10 00:45", 124, "Tool2", "", 56.2,  83.5, 122.8, 139.5, 0.0064, 16800, 16805, -0.10, -0.06, -0.07, 9010],
+            ["2025/3/11 00:45", 124, "Tool2", "", 56.3,  83.7, 123.1, 139.8, 0.0065, 16790, 16800, -0.09, -0.05, -0.05, 9020],
+            ["2025/3/12 00:45", 124, "Tool2", "", 56.1,  83.9, 123.5, 140.1, 0.0066, 16810, 16815, -0.10, -0.06, -0.08, 9025],
         ]
-        columns1 = ["point_time", "Batch_ID", "GroupName", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1"]
-        columns2 = ["", "", "ChartName", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"]
+        columns1 = ["point_time", "Batch_ID", "Matching", "GroupName", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1", "Group1"]
+        columns2 = ["",           "",          "",          "ChartName", "A",      "B",      "C",      "D",      "E",      "F",      "G",      "H",      "I",      "J",      "K"]
 
         save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save type3 example file", "type3_example.csv", "CSV Files (*.csv)")
         if save_path:
@@ -5566,11 +5532,10 @@ class SplitDataWidget(QtWidgets.QWidget):
         """)
 
     def _update_processing_mode(self, index):
-        """根據下拉選單的選擇更新內部處理模式。"""
-        selected_text = self.processing_mode_combo.currentText()
-        if "Type3_Horizontal" in selected_text:
+        """根據下拉選單的索引更新內部處理模式（避免語言翻譯影響判斷）。"""
+        if index == 0:
             self._current_processing_mode = "Type3_Horizontal"
-        elif "Type2_Vertical" in selected_text:
+        elif index == 1:
             self._current_processing_mode = "Type2_Vertical"
 
     def select_input_files(self):
@@ -5581,15 +5546,6 @@ class SplitDataWidget(QtWidgets.QWidget):
         if file_paths:
             self.input_path_entry.setText(";".join(file_paths))
             self.status_label.setText(f"Selected {len(file_paths)} files.")
-
-    def select_output_folder(self):
-        """開啟資料夾對話框，選擇輸出資料夾。"""
-        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Output Folder"
-        )
-        if folder_path:
-            self.output_folder_entry.setText(folder_path)
-            self.status_label.setText(f"Selected output folder: {os.path.basename(folder_path)}")
 
     def sanitize_filename(self, name):
         """輔助函數：清理字串，使其適用於檔案名稱。"""
@@ -5764,15 +5720,14 @@ class SplitDataWidget(QtWidgets.QWidget):
         input_paths_str = self.input_path_entry.text()
         input_paths = [path.strip() for path in input_paths_str.split(';') if path.strip()]
         
-        base_output_folder = self.output_folder_entry.text()
         # 從內部模式變數獲取，而不是直接從下拉選單獲取顯示文本
         processing_mode = self._current_processing_mode 
 
-        if not input_paths or not base_output_folder:
-            QtWidgets.QMessageBox.warning(self, "Warning", "Please select at least one input file and output folder!")
+        if not input_paths:
+            QtWidgets.QMessageBox.warning(self, "Warning", "Please select at least one input file!")
             return
 
-        final_output_folder = os.path.join(base_output_folder, "raw_charts")
+        final_output_folder = resource_path('input/raw_charts')
         
         try:
             os.makedirs(final_output_folder, exist_ok=True)

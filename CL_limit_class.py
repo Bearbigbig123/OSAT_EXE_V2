@@ -2081,14 +2081,14 @@ class CLTightenCalculator:
 
         y = chart_data['value'].values
         
-        # 檢查是否有 ByTool 欄位並繪製分色圖
-        if 'ByTool' in chart_data.columns:
+        # 檢查是否有 Matching 欄位並繪製分色圖
+        if 'Matching' in chart_data.columns:
             # 過濾掉 NaN 的 Tool 資料
-            chart_data_with_tool = chart_data[pd.notna(chart_data['ByTool'])].copy()
+            chart_data_with_tool = chart_data[pd.notna(chart_data['Matching'])].copy()
             
             if not chart_data_with_tool.empty:
                 # 準備顏色映射
-                tools = sorted([str(t) for t in chart_data_with_tool['ByTool'].unique() if pd.notna(t)])
+                tools = sorted([str(t) for t in chart_data_with_tool['Matching'].unique() if pd.notna(t)])
                 color_cycle = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#0891b2']
                 tool_colors = {t: color_cycle[i % len(color_cycle)] for i, t in enumerate(tools)}
                 
@@ -2097,7 +2097,7 @@ class CLTightenCalculator:
                 
                 # 按 Tool 分色繪製點
                 for tool in tools:
-                    mask = chart_data['ByTool'].astype(str) == tool
+                    mask = chart_data['Matching'].astype(str) == tool
                     if mask.any():
                         x_tool = [x[i] for i in range(len(x)) if mask.iloc[i]]
                         y_tool = [y[i] for i in range(len(y)) if mask.iloc[i]]
@@ -2111,7 +2111,7 @@ class CLTightenCalculator:
                 # 沒有有效的 Tool 資料，使用原始繪製方式
                 ax.plot(x, y, 'bo-', markersize=3, linewidth=1, alpha=0.8, antialiased=True)
         else:
-            # 沒有 ByTool 欄位，使用原始繪製方式
+            # 沒有 Matching 欄位，使用原始繪製方式
             ax.plot(x, y, 'bo-', markersize=3, linewidth=1, alpha=0.8, antialiased=True)
 
         # 判斷是否只顯示 Sug (當 Ori 與 Sug 差距太大時)

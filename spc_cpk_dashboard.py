@@ -971,7 +971,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
         
         # 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
         
         if tool_col:
             df_plot = df.copy()
@@ -1032,7 +1032,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
         
         # 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
         
         if tool_col:
             df_plot = df.copy()
@@ -1602,7 +1602,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             ax.plot(x, y, linestyle='-', color='#d1d5db', linewidth=1, zorder=1) 
 
             # --- 新增：按 Tool 分色畫點（若無 Tool 則使用統一顏色）---
-            tool_col = next((c for c in ['ByTool', 'tool_id', '機台'] if c in plot_df.columns), None)
+            tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', '機台'] if c in plot_df.columns), None)
             
             if tool_col and not plot_df[tool_col].isna().all():
                 try:
@@ -1733,7 +1733,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         self.fig_sub3.clear()
 
         # 1. 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['ByTool', 'tool_id', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', '機台'] if c in df.columns), None)
         # 統一顏色調色盤 (與大圖分色邏輯一致)
         colors = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed']
 
