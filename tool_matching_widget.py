@@ -1139,6 +1139,14 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 except: pass
             item = QtWidgets.QTableWidgetItem(str(value))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            # 紅色標記：mean_index(j=4) 或 sigma_index(j=5) 異常時
+            try:
+                if j == 4 and float(row_values[4]) >= m_th:
+                    item.setForeground(QtGui.QColor("#D32F2F"))
+                elif j == 5 and float(row_values[5]) >= s_th:
+                    item.setForeground(QtGui.QColor("#D32F2F"))
+            except (ValueError, TypeError):
+                pass
             info_table.setItem(0, j, item)
 
         info_table.resizeColumnsToContents()

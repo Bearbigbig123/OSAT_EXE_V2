@@ -3371,14 +3371,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         # 選單按鈕
         self.home_button = self._create_menu_button(tr("home"))
-        self.split_data_button = self._create_menu_button(tr("split_data"))
-        self.oob_system_button = self._create_menu_button(tr("oob_spc_system"))
-        self.cpk_calculation_button = self._create_menu_button(tr("cpk_calculator"))
+        self.split_data_button = self._create_menu_button(f"1. {tr('split_data')}")
+        self.data_check_button = self._create_menu_button(f"2. {tr('data_health_monitor')}")
+        self.oob_system_button = self._create_menu_button(f"3. {tr('oob_spc_system')}")
+        self.cpk_calculation_button = self._create_menu_button(f"3. {tr('cpk_calculator')}")
         # --- 新增 Tool Matching 按鈕 ---
-        self.tool_matching_button = self._create_menu_button(tr("tool_matching"))
+        self.tool_matching_button = self._create_menu_button(f"3. {tr('tool_matching')}")
         # --- 新增 CL Tighten Calculator 按鈕 ---
-        self.cl_tighten_button = self._create_menu_button(tr("cl_tighten"))
-        self.data_check_button = self._create_menu_button(tr("data_health_monitor"))
+        self.cl_tighten_button = self._create_menu_button(f"3. {tr('cl_tighten')}")
         self.left_menu_layout.addWidget(self.home_button)
         self.left_menu_layout.addWidget(self.split_data_button)
         self.left_menu_layout.addWidget(self.data_check_button)
@@ -3603,12 +3603,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         # 更新左側選單按鈕
         self.home_button.setText(tr("home"))
-        self.data_check_button.setText(tr("data_health_monitor"))
-        self.split_data_button.setText(tr("split_data"))
-        self.oob_system_button.setText(tr("oob_spc_system"))
-        self.cpk_calculation_button.setText(tr("cpk_calculator"))
-        self.tool_matching_button.setText(tr("tool_matching"))
-        self.cl_tighten_button.setText(tr("cl_tighten"))
+        self.split_data_button.setText(f"1. {tr('split_data')}")
+        self.data_check_button.setText(f"2. {tr('data_health_monitor')}")
+        self.oob_system_button.setText(f"3. {tr('oob_spc_system')}")
+        self.cpk_calculation_button.setText(f"3. {tr('cpk_calculator')}")
+        self.tool_matching_button.setText(f"3. {tr('tool_matching')}")
+        self.cl_tighten_button.setText(f"3. {tr('cl_tighten')}")
         
         # 更新按鈕文字
         if hasattr(self, 'settings_button'):
@@ -5287,7 +5287,7 @@ class SplitDataWidget(QtWidgets.QWidget):
         self.progress_bar.setFormat(tr('processing_progress'))
         
         # 更新狀態標籤
-        if self.status_label.text() == "Ready." or self.status_label.text() == "準備就緒。":
+        if self.status_label.text() in ("Ready.", "準備就緒。", "준비 완료."):
             self.status_label.setText(tr('ready'))
 
     def init_ui(self):
