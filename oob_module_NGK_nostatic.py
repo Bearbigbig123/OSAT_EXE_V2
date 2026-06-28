@@ -45,6 +45,26 @@ PLOT_STYLE = {
     'legend': 7
 }
 
+
+def configure_external_right_legend(fig, ax, item_count, legend_fontsize):
+    import math
+
+    max_rows_per_column = 8
+    ncol = max(1, math.ceil(max(item_count, 1) / max_rows_per_column))
+    right_margin = max(0.50, 0.78 - 0.10 * (ncol - 1))
+
+    ax.legend(
+        loc='upper left',
+        bbox_to_anchor=(1.06, 1.0),
+        borderaxespad=0.0,
+        fontsize=max(6, legend_fontsize - 1),
+        ncol=ncol,
+        columnspacing=0.9,
+        handletextpad=0.4,
+        frameon=False
+    )
+    fig.subplots_adjust(left=0.06, right=right_margin, top=0.82, bottom=0.28)
+
 # Toggle Switch 自定義類
 class ToggleSwitch(QtWidgets.QWidget):
     """滑動開關 Widget"""
@@ -707,7 +727,12 @@ def record_high_low_calculator(current_week_data, historical_data):
         if len(current_week_data) == 0 or len(historical_data) == 0:
             return {
                 'record_high': False,
-                'record_low': False, 
+                'record_low': False,
+                'record_high_count': 0,
+                'record_low_count': 0,
+                'record_high_low_count': 0,
+                'record_high_low_risk': 'NONE',
+                'record_high_low_display': 'None (High=0, Low=0, Total=0)',
                 'highlight_status': 'NO_HIGHLIGHT'
             }
         
@@ -750,17 +775,37 @@ def record_high_low_calculator(current_week_data, historical_data):
         epsilon = 1e-9
         record_high = current_max > (historical_max + epsilon)
         record_low = current_min < (historical_min - epsilon)
+        record_high_count = int(np.sum(current_week_data > (historical_max + epsilon)))
+        record_low_count = int(np.sum(current_week_data < (historical_min - epsilon)))
+        record_high_low_count = record_high_count + record_low_count
+
+        if record_high_low_count >= 3:
+            record_high_low_risk = 'MEDIUM'
+            record_high_low_display = f"Medium Risk (High={record_high_count}, Low={record_low_count}, Total={record_high_low_count})"
+        elif record_high_low_count > 0:
+            record_high_low_risk = 'LOW'
+            record_high_low_display = f"Low Risk (High={record_high_count}, Low={record_low_count}, Total={record_high_low_count})"
+        else:
+            record_high_low_risk = 'NONE'
+            record_high_low_display = "None (High=0, Low=0, Total=0)"
         
         # 如果創下新高或新低，則需要高亮顯示
-        highlight_status = 'HIGHLIGHT' if (record_high or record_low) else 'NO_HIGHLIGHT'
+        highlight_status = 'HIGHLIGHT' if record_high_low_count > 0 else 'NO_HIGHLIGHT'
         
         print(f"  record_high_low_calculator: 當週最高={current_max:.4f}, 歷史最高={historical_max:.4f}, 創新高={record_high}")
         print(f"  record_high_low_calculator: 當週最低={current_min:.4f}, 歷史最低={historical_min:.4f}, 創新低={record_low}")
         print(f"  record_high_low_calculator: 高亮狀態={highlight_status}")
         
+        print(f"  record_high_low_calculator: Record High Count={record_high_count}, Record Low Count={record_low_count}, Total={record_high_low_count}")
+        print(f"  record_high_low_calculator: Risk={record_high_low_risk}, Display={record_high_low_display}")
         return {
             'record_high': record_high,
             'record_low': record_low,
+            'record_high_count': record_high_count,
+            'record_low_count': record_low_count,
+            'record_high_low_count': record_high_low_count,
+            'record_high_low_risk': record_high_low_risk,
+            'record_high_low_display': record_high_low_display,
             'highlight_status': highlight_status
         }
         
@@ -769,6 +814,11 @@ def record_high_low_calculator(current_week_data, historical_data):
         return {
             'record_high': False,
             'record_low': False,
+            'record_high_count': 0,
+            'record_low_count': 0,
+            'record_high_low_count': 0,
+            'record_high_low_risk': 'NONE',
+            'record_high_low_display': 'None (High=0, Low=0, Total=0)',
             'highlight_status': 'NO_HIGHLIGHT'
         }
 def review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles):
@@ -1242,6 +1292,10 @@ def ooc_calculator(data, ucl, lcl):
 def review_ooc_results(ooc_cnt, ooc_ratio, threshold=0.05):
     return 'HIGHLIGHT' if ooc_ratio > threshold and ooc_cnt > 1 else 'NO_HIGHLIGHT'
 
+
+def review_3o7d_results(ooc_cnt):
+    return 'HIGHLIGHT' if ooc_cnt >= 3 else 'NO_HIGHLIGHT'
+
 # 計算Sticking Rate
 def sticking_rate_calculator(baseline_data, weekly_data):
     def get_mode(data):
@@ -1396,6 +1450,7 @@ def discrete_oob_calculator(base_data, weekly_data, chart_info, raw_df=None,
         'HL_sticking_shift': 'NO_HIGHLIGHT',
         'HL_trending': 'NO_HIGHLIGHT',
         'HL_high_OOC': 'NO_HIGHLIGHT',
+        'HL_3O7D': 'NO_HIGHLIGHT',
         'HL_category_LT_shift': 'NO_HIGHLIGHT',  # 新增的離散型專用項目
         'discrete_method': True
     }
@@ -1428,6 +1483,7 @@ def discrete_oob_calculator(base_data, weekly_data, chart_info, raw_df=None,
         ooc_results = ooc_calculator(weekly_df, chart_info.get('UCL'), chart_info.get('LCL'))
         ooc_highlight = review_ooc_results(ooc_results[1], ooc_results[2])
         results['HL_high_OOC'] = ooc_highlight
+        results['HL_3O7D'] = review_3o7d_results(ooc_results[1])
         
         # 4. 修改後的 k-shift 計算（加入 capping rule）
         print("  離散型 OOB: 計算修改後的 K-shift...")
@@ -1830,7 +1886,9 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
 
         print("  正在呼叫 review_ooc_results...")
         ooc_highlight = review_ooc_results(ooc_results[1], ooc_results[2]) # 注意 ooc_results[1] 是 ooc_cnt, ooc_results[2] 是 ooc_points
+        three_o7d_highlight = review_3o7d_results(ooc_results[1])
         print(f"  review_ooc_results 返回: {ooc_highlight}")
+        print(f"  review_3o7d_results 返回: {three_o7d_highlight}")
 
         print("  正在呼叫 sticking_rate_calculator...")
         # sticking_rate_calculator 需要週數據和基線數據的 Series
@@ -1849,7 +1907,16 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
         print(f"  DEBUG: 當週時間範圍 - 從 {weekly_start_date} 到 {weekly_end_date}")
         print(f"  DEBUG: 基線結束與當週開始間隔 = {weekly_start_date - baseline_end_date}")
         # 計算當週數據是否創下歷史新高或新低
-        record_results = record_high_low_calculator(weekly_data['point_val'].values, baseline_data['point_val'].values) if not baseline_insufficient and not baseline_empty else {'highlight_status': 'NO_HIGHLIGHT', 'record_high': False, 'record_low': False}
+        record_results = record_high_low_calculator(weekly_data['point_val'].values, baseline_data['point_val'].values) if not baseline_insufficient and not baseline_empty else {
+            'highlight_status': 'NO_HIGHLIGHT',
+            'record_high': False,
+            'record_low': False,
+            'record_high_count': 0,
+            'record_low_count': 0,
+            'record_high_low_count': 0,
+            'record_high_low_risk': 'NONE',
+            'record_high_low_display': 'None (High=0, Low=0, Total=0)'
+        }
         print(f"  record_high_low_calculator 返回: {record_results}")
 
         # 判斷是否需要 highlight (任何一個子指標需要高亮，則總體高亮)
@@ -1860,6 +1927,7 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
              sticking_rate_results.get('highlight_status') == 'HIGHLIGHT' or
              trending_results == 'HIGHLIGHT' or
              ooc_highlight == 'HIGHLIGHT' or # 應該也要考慮 ooc_highlight
+             three_o7d_highlight == 'HIGHLIGHT' or
              record_results.get('highlight_status') == 'HIGHLIGHT' # 新增 record high/low 判斷
         ) else 'NO_HIGHLIGHT'
         print(f"  計算出的 highlight_status: {highlight_status}")
@@ -1878,10 +1946,16 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
             'HL_sticking_shift': sticking_rate_results.get('highlight_status', 'N/A'),
             'HL_trending': trending_results, # trending_results 本身就是 HIGHLIGHT/NO_HIGHLIGHT
             'HL_high_OOC': ooc_highlight, # ooc_highlight 本身就是 HIGHLIGHT/NO_HIGHLIGHT
+            'HL_3O7D': three_o7d_highlight,
             'HL_record_high_low': record_results.get('highlight_status', 'N/A'), # 新增 record high/low 欄位
             'record_high': record_results.get('record_high', False), # 是否創新高
             'record_low': record_results.get('record_low', False), # 是否創新低
             'Material_no': chart_info.get('material_no', 'N/A'),
+            'record_high_count': record_results.get('record_high_count', 0),
+            'record_low_count': record_results.get('record_low_count', 0),
+            'record_high_low_count': record_results.get('record_high_low_count', 0),
+            'record_high_low_risk': record_results.get('record_high_low_risk', 'NONE'),
+            'record_high_low_display': record_results.get('record_high_low_display', 'None (High=0, Low=0, Total=0)'),
             'group_name': chart_info.get('group_name', 'N/A'),
             'chart_name': chart_info.get('chart_name', 'N/A'),
             'chart_ID': chart_info.get('ChartID', 'N/A'),
@@ -2144,7 +2218,7 @@ def get_unified_title(chart_info):
     return f"{display_group}[{chart_info['chart_name']}][{chart_info['Characteristics']}]"
 
 
-def add_right_cl_labels(ax, chart_info, x_pos=None):
+def add_right_cl_labels(ax, chart_info, x_pos=None, ha='left'):
     """
     在圖表右側添加 UCL/Target/LCL 標籤
     """
@@ -2157,9 +2231,29 @@ def add_right_cl_labels(ax, chart_info, x_pos=None):
     ]
     for y_val, text, color in labels:
         if pd.notna(y_val):
-            ax.text(x_pos, y_val, text, va='center', ha='left',
+            ax.text(x_pos, y_val, text, va='center', ha=ha,
                     fontsize=7, color=color, fontweight='bold',
                     transform=ax.get_yaxis_transform())
+
+
+def add_corner_cl_labels(ax, chart_info, x_pos=0.985, y_start=0.98, y_step=0.08):
+    labels = [
+        ('UCL', '#E83F6F'),
+        ('Target', '#087E8B'),
+        ('LCL', '#E83F6F')
+    ]
+    for idx, (text, color) in enumerate(labels):
+        ax.text(
+            x_pos,
+            y_start - idx * y_step,
+            text,
+            va='top',
+            ha='right',
+            fontsize=7,
+            color=color,
+            fontweight='bold',
+            transform=ax.transAxes
+        )
 
 
 def setup_unified_tooltip(ax, canvas, line_artists, df_source, tool_color_map=None, oob_info="N/A"):
@@ -2489,10 +2583,10 @@ def plot_spc_by_tool_color(raw_df, chart_info, weekly_start_date, weekly_end_dat
     unified_title = get_unified_title(chart_info)
     ax.set_title(f"{unified_title}\nBy Tool Comparison", loc='left', fontsize=PLOT_STYLE['title'])
     
-    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=5)
+    configure_external_right_legend(fig, ax, len(unique_tools), PLOT_STYLE['legend'])
     ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']], 
               -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', alpha=0.5)
-    add_right_cl_labels(ax, chart_info)
+    add_right_cl_labels(ax, chart_info, x_pos=1.015, ha='right')
     
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
@@ -2501,7 +2595,6 @@ def plot_spc_by_tool_color(raw_df, chart_info, weekly_start_date, weekly_end_dat
     setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
     
     # 強制對齊邊距參數
-    fig.subplots_adjust(left=0.06, right=0.92, top=0.82, bottom=0.28)
     
     canvas._plot_args = (raw_df.copy(), chart_info.copy(), weekly_start_date, weekly_end_date, oob_info)
     canvas._plot_kind = 'spc_by_tool'
@@ -2548,10 +2641,10 @@ def plot_spc_by_tool_group(raw_df, chart_info, oob_info="N/A"):
     unified_title = get_unified_title(chart_info)
     ax.set_title(f"{unified_title}\nMachine Grouping Analysis", loc='left', fontsize=PLOT_STYLE['title'])
     
-    ax.legend(loc='upper left', fontsize=PLOT_STYLE['legend'], ncol=5)
+    configure_external_right_legend(fig, ax, len(unique_tools), PLOT_STYLE['legend'])
     ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']], 
               -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', alpha=0.5)
-    add_right_cl_labels(ax, chart_info)
+    add_right_cl_labels(ax, chart_info, x_pos=1.04, ha='right')
 
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
@@ -2560,7 +2653,6 @@ def plot_spc_by_tool_group(raw_df, chart_info, oob_info="N/A"):
     setup_unified_tooltip(ax, canvas, artists, df, tool_color_map, oob_info=oob_info)
     
     # 強制對齊邊距參數
-    fig.subplots_adjust(left=0.06, right=0.92, top=0.82, bottom=0.28)
     
     canvas._plot_args = (df.copy(), chart_info.copy(), oob_info)
     canvas._plot_kind = 'spc_by_tool_group'
@@ -2835,6 +2927,9 @@ def save_results_to_excel(results_df, scale_factor=0.3):
 
     cell_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10})
     header_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 12, 'bold': True})
+    risk_medium_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#f59e0b', 'bold': True})
+    risk_low_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#10b981', 'bold': True})
+    risk_none_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#64748B'})
 
     col_widths = {}
 
@@ -2937,7 +3032,16 @@ def save_results_to_excel(results_df, scale_factor=0.3):
 
         for col_idx, header in enumerate(data_columns):
             value = getattr(row, header)
-            worksheet.write(row_idx, col_idx + 4, value, cell_format)
+            cell_to_use = cell_format
+            if header in ['record_high_low_risk', 'record_high_low_display']:
+                risk_value = str(getattr(row, 'record_high_low_risk', 'NONE')).upper()
+                if risk_value == 'MEDIUM':
+                    cell_to_use = risk_medium_format
+                elif risk_value == 'LOW':
+                    cell_to_use = risk_low_format
+                else:
+                    cell_to_use = risk_none_format
+            worksheet.write(row_idx, col_idx + 4, value, cell_to_use)
             col_widths[col_idx + 4] = max(col_widths.get(col_idx + 4, 0), len(str(value)))
 
     worksheet.set_column(0, 0, image_column_width / 7)
@@ -2965,7 +3069,7 @@ def resource_path(relative_path):
 
 # 常數定義
 HEADERS = ["Chart Info.", "Total Chart", "Weekly Chart", "By Tool (Color)", "By Tool (Group)"]
-OOB_KEYS = ['HL_P95_shift', 'HL_P50_shift', 'HL_P05_shift', 'HL_sticking_shift', 'HL_trending', 'HL_high_OOC', 'HL_record_high_low', 'HL_category_LT_shift']
+OOB_KEYS = ['HL_P95_shift', 'HL_P50_shift', 'HL_P05_shift', 'HL_sticking_shift', 'HL_trending', 'HL_high_OOC', 'HL_3O7D', 'HL_record_high_low', 'HL_category_LT_shift']
 
 
 class TriangleButton(QtWidgets.QPushButton):
@@ -3330,7 +3434,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         # --- 左側選單區域 ---
         self.left_menu_widget = QtWidgets.QWidget()
-        self.left_menu_widget.setFixedWidth(180) # 設定選單寬度
+        self.left_menu_widget.setFixedWidth(205) # 設定選單寬度
         self.left_menu_widget.setStyleSheet("background-color: #344CB7;") # 選單背景色
         self.left_menu_layout = QtWidgets.QVBoxLayout(self.left_menu_widget)
         self.left_menu_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop) # 按鈕靠頂部對齊
@@ -4576,7 +4680,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             # 提取 record_results 供繪圖使用
             record_results = {
                 'record_high': result.get('record_high', False),
-                'record_low': result.get('record_low', False)
+                'record_low': result.get('record_low', False),
+                'record_high_count': result.get('record_high_count', 0),
+                'record_low_count': result.get('record_low_count', 0),
+                'record_high_low_count': result.get('record_high_low_count', 0),
+                'record_high_low_risk': result.get('record_high_low_risk', 'NONE'),
+                'record_high_low_display': result.get('record_high_low_display', 'None (High=0, Low=0, Total=0)')
             }
 
             oob_true_keys = [k for k in OOB_KEYS if result.get(k) == 'HIGHLIGHT']
@@ -4752,6 +4861,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 weekly_df = pd.DataFrame({'point_val': weekly_data['point_val']})
                 ooc_results = ooc_calculator(weekly_df, chart_info.get('UCL'), chart_info.get('LCL'))
                 ooc_highlight = review_ooc_results(ooc_results[1], ooc_results[2])
+                three_o7d_highlight = review_3o7d_results(ooc_results[1])
                 result['ooc_cnt'] = ooc_results[1]
                 
                 # === 離散型 OOB 計算 ===
@@ -4781,10 +4891,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'HL_sticking_shift': discrete_oob_result.get('HL_sticking_shift', 'NO_HIGHLIGHT'),
                     'HL_trending': discrete_oob_result.get('HL_trending', 'NO_HIGHLIGHT'),
                     'HL_high_OOC': ooc_highlight,
+                    'HL_3O7D': three_o7d_highlight,
                     'HL_category_LT_shift': discrete_oob_result.get('HL_category_LT_shift', 'NO_HIGHLIGHT'),
                     'HL_record_high_low': record_results.get('highlight_status', 'NO_HIGHLIGHT'),
                     'record_high': record_results.get('record_high', False),
-                    'record_low': record_results.get('record_low', False)
+                    'record_low': record_results.get('record_low', False),
+                    'record_high_count': record_results.get('record_high_count', 0),
+                    'record_low_count': record_results.get('record_low_count', 0),
+                    'record_high_low_count': record_results.get('record_high_low_count', 0),
+                    'record_high_low_risk': record_results.get('record_high_low_risk', 'NONE'),
+                    'record_high_low_display': record_results.get('record_high_low_display', 'None (High=0, Low=0, Total=0)')
                 })
                 
                 print(f" - _process_discrete_chart: 離散型 OOB 計算完成")
@@ -4798,10 +4914,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'HL_sticking_shift': 'NO_HIGHLIGHT',
                     'HL_trending': 'NO_HIGHLIGHT',
                     'HL_high_OOC': 'NO_HIGHLIGHT',
+                    'HL_3O7D': 'NO_HIGHLIGHT',
                     'HL_category_LT_shift': 'NO_HIGHLIGHT',
                     'HL_record_high_low': 'NO_HIGHLIGHT',
                     'record_high': False,
-                    'record_low': False
+                    'record_low': False,
+                    'record_high_count': 0,
+                    'record_low_count': 0,
+                    'record_high_low_count': 0,
+                    'record_high_low_risk': 'NONE',
+                    'record_high_low_display': 'None (High=0, Low=0, Total=0)'
                 })
                 print(f" - _process_discrete_chart: 基線數據不足，所有 OOB 設為 NO_HIGHLIGHT")
 
@@ -4895,6 +5017,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                          'group_name', 'chart_name', 'chart_ID', 'Characteristics',
                          'USL', 'LSL', 'UCL', 'LCL', 'Target', 'Cpk', 'Resolution',
                          'HL_record_high_low', 'record_high', 'record_low',
+                         'record_high_count', 'record_low_count', 'record_high_low_count',
+                         'record_high_low_risk', 'record_high_low_display',
                  'chart_path', 'weekly_chart_path', 'by_tool_color_path', 'by_tool_group_path']
         for col in expected_cols:
             if col not in results_df.columns:
@@ -5143,8 +5267,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                         </thead>
                         <tbody>
                             {''.join(self.create_table_row(key, result) for key in [
-                                'data_cnt', 'ooc_cnt', 'WE_Rule', 'OOB_Rule', 'data_type', 'Material_no',
-                                'group_name', 'chart_name', 'Cpk'
+                                'data_cnt', 'ooc_cnt', 'WE_Rule', 'OOB_Rule', 'Material_no',
+                                'group_name', 'chart_name', 'Cpk', 'record_high_low_summary'
                             ])}
                         </tbody>
                     </table>
@@ -5160,16 +5284,44 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         return label
 
+    def _format_record_high_low_risk(self, risk_value):
+            risk = str(risk_value or 'NONE').upper()
+            if risk == 'MEDIUM':
+                return '<span style="color:#f59e0b; font-weight:bold;">Medium Risk</span>'
+            if risk == 'LOW':
+                return '<span style="color:#10b981; font-weight:bold;">Low Risk</span>'
+            return '<span style="color:#64748B;">None</span>'
+
+    def _format_record_high_low_summary(self, result):
+            risk_html = self._format_record_high_low_risk(result.get('record_high_low_risk', 'NONE'))
+            high_count = result.get('record_high_count', 0)
+            low_count = result.get('record_low_count', 0)
+            total_count = result.get('record_high_low_count', 0)
+            return f"{risk_html}<br>High={high_count}, Low={low_count}, Total={total_count}"
+
     def create_table_row(self, key, result):
             value = result.get(key, 'N/A')
+            display_name_map = {
+                'data_cnt': 'Data Count',
+                'ooc_cnt': 'OOC Count',
+                'WE_Rule': 'WE Rule',
+                'OOB_Rule': 'OOB Rule',
+                'group_name': 'Group Name',
+                'chart_name': 'Chart Name',
+                'record_high_low_summary': 'Record High/Low',
+            }
 
             if key == 'group_name' and value == 'Default':
                 value = ''
 
-            display_key = key.replace('_', ' ').title()
+            display_key = display_name_map.get(key, key.replace('_', ' ').title())
 
             if key in ['WE_Rule', 'OOB_Rule']:
                  value = value.replace(', ', '<br>')
+            elif key == 'record_high_low_summary':
+                 value = self._format_record_high_low_summary(result)
+            elif key == 'record_high_low_risk':
+                 value = self._format_record_high_low_risk(value)
 
             return f"<tr><td>{display_key}:</td><td>{value}</td></tr>"
 
@@ -5961,7 +6113,7 @@ class CLTightenWidget(QtWidgets.QWidget):
         # 更新統計標籤
         if hasattr(self, 'stats_label'):
             current_text = self.stats_label.text()
-            if current_text in ["No data loaded", "未載入資料", "N/A"]:
+            if current_text in ["No data loaded", "未載入資料", "데이터가 로드되지 않음", "N/A"]:
                 self.stats_label.setText(tr("no_data_loaded"))
         
         # 更新預設標籤

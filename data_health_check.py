@@ -32,7 +32,7 @@ class DataValidatorWorker(QtCore.QThread):
     def stop(self):
         self._is_running = False
 
-    def find_csv_file_by_prefix(self, directory, prefix):
+    def find_csv_file_exact(self, directory, expected_filename):
         """
         在指定目錄中尋找以指定前綴開頭的CSV檔案
         :param directory: 搜尋目錄
@@ -44,23 +44,19 @@ class DataValidatorWorker(QtCore.QThread):
                 return None
             
             # 列出目錄中所有檔案
-            all_files = os.listdir(directory)
+            file_path = os.path.join(directory, expected_filename)
             
             # 篩選出以指定前綴開頭且以.csv結尾的檔案
-            matching_files = [
-                f for f in all_files 
-                if f.startswith(prefix) and f.lower().endswith('.csv')
-            ]
+            if os.path.isfile(file_path):
+                return file_path
             
-            if matching_files:
+            # Exact match only; do not fall back to prefix-based matching.
                 # 如果找到多個，選擇第一個（可以根據需要調整排序邏輯）
-                selected_file = sorted(matching_files)[0]  # 按字母順序排序後選第一個
-                return os.path.join(directory, selected_file)
             
             return None
             
         except Exception as e:
-            print(f"Error searching for CSV files: {e}")
+            print(f"Error searching for exact CSV file: {e}")
             return None
 
     def run(self):
@@ -283,8 +279,8 @@ class DataValidatorWorker(QtCore.QThread):
                         pass
 
                 # --- C. CSV 檔案檢查 (模糊比對：以 groupname_chartname 開頭) ---
-                csv_prefix = f"{group}_{chart}"
-                found_file = self.find_csv_file_by_prefix(self.raw_data_dir, csv_prefix)
+                expected_csv_filename = f"{group}_{chart}.csv"
+                found_file = self.find_csv_file_exact(self.raw_data_dir, expected_csv_filename)
                 csv_status = "Not Checked"
                 
                 # 如果 Excel 有錯誤，完全跳過 CSV 檢查（該行已計入 critical_count，不重複計數）
@@ -292,7 +288,7 @@ class DataValidatorWorker(QtCore.QThread):
                     csv_status = "Skipped (Excel Error)"
                 elif not has_error_in_row:
                     if not found_file:
-                        self.emit_log("Skipped", f"CSV ({chart_id})", "File Not Found", f"No file found with prefix: {csv_prefix}*. Ensure it is in 'input'.", csv_prefix)
+                        self.emit_log("Skipped", f"CSV ({chart_id})", "File Not Found", f"Expected: {expected_csv_filename}. Ensure it is in 'input/raw_charts'.", expected_csv_filename)
                         skipped_count += 1
                         file_not_found_count += 1
                         csv_status = "File Not Found (Skipped)"
@@ -300,7 +296,7 @@ class DataValidatorWorker(QtCore.QThread):
                         try:
                             # 顯示實際找到的檔案名稱
                             actual_filename = os.path.basename(found_file)
-                            print(f"  [DEBUG] 找到匹配檔案: {actual_filename} (前綴: {csv_prefix})")
+                            print(f"  [DEBUG] 找到精確匹配檔案: {actual_filename}")
                             
                             # 加入超時保護：只讀取前5行進行驗證
                             df_csv = pd.read_csv(found_file, nrows=5)

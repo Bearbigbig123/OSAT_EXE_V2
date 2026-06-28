@@ -1,0 +1,2 @@
+GroupName,ChartName,ChartID,Material_no,Target,UCL,LCL,USL,LSL,Characteristics,DetectionLimit,ExpectedPattern,SampleCount,Resolution
+OOB3O7D,Rule_Test,OOB3O7D_001,MAT_3O7D,5,10,0,12,-2,Nominal,,Continuous,27,0.1
