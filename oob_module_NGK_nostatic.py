@@ -689,6 +689,53 @@ def find_matching_file(directory, group_name, chart_name):
     
     return matching_files[0] if matching_files else None
 
+
+def build_raw_file_index(directory):
+    try:
+        filenames = [name for name in os.listdir(directory) if name.lower().endswith('.csv')]
+    except Exception as e:
+        print(f"[Warning] Failed to build raw CSV index: {e}")
+        return {'exact': {}, 'filenames': [], 'directory': directory}
+
+    return {
+        'exact': {os.path.splitext(name)[0]: os.path.join(directory, name) for name in filenames},
+        'filenames': filenames,
+        'directory': directory
+    }
+
+
+def find_matching_file_from_index(file_index, group_name, chart_name):
+    group_name = str(group_name)
+    chart_name = str(chart_name)
+    base_name = f"{group_name}_{chart_name}"
+
+    exact_path = file_index.get('exact', {}).get(base_name)
+    if exact_path:
+        return exact_path
+
+    pattern = re.compile(rf"{re.escape(group_name)}_{re.escape(chart_name)}(?:_\d+_\d+)?\.csv$")
+    directory = file_index.get('directory', '')
+    for filename in file_index.get('filenames', []):
+        if pattern.match(filename):
+            return os.path.join(directory, filename)
+
+    return None
+
+
+def make_output_image_path(prefix, group_name, chart_name):
+    output_path = resource_path('output')
+    os.makedirs(output_path, exist_ok=True)
+    safe_group_name = "" if str(group_name) == "Default" else str(group_name)
+    base_name = f"{prefix}_{safe_group_name}_{chart_name}.png"
+    safe_name = re.sub(r'[\\/*?:"<>|]', '_', base_name)
+    return os.path.join(output_path, safe_name)
+
+
+def save_canvas_figure(canvas, image_path, dpi=100):
+    os.makedirs(os.path.dirname(image_path), exist_ok=True)
+    canvas.figure.savefig(image_path, dpi=dpi, bbox_inches='tight')
+    return image_path
+
 # 優化後的 get_percentiles 函數
 def get_percentiles(values):
     import numpy as np
@@ -4291,7 +4338,6 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             return None
 
     def process_charts(self):
-        import time
         self.results = []
         total_charts_count = 0
         skipped_charts_count = 0
@@ -4308,9 +4354,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             total_charts_count = len(all_charts_info)
             self.progress_bar.setMaximum(100)
 
-            # 性能優化：預處理所有圖表的數據類型
-            print("=== 性能優化：開始預處理數據類型 ===")
-            self.preprocess_chart_types(all_charts_info)
+            # Build once to avoid scanning the raw data folder for every chart.
+            print("=== Building raw CSV file index ===")
+            self.raw_file_index = build_raw_file_index(self.raw_data_directory)
+            self.chart_types_cache = {}
             
             # 清空 CSV 快取（如果之前有的話）
             self.csv_cache.clear()
@@ -4349,7 +4396,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 print(f"\n正在處理圖表: GroupName={group_name}, ChartName={chart_name}")
 
                 try:
-                    filepath = find_matching_file(self.raw_data_directory, group_name, chart_name)
+                    filepath = find_matching_file_from_index(self.raw_file_index, group_name, chart_name)
                     
                     if filepath and os.path.exists(filepath):
                         # 性能優化：使用快取讀取 CSV
@@ -4359,6 +4406,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                             print(f" - 原始資料 shape: {raw_df.shape}")
 
                             # 性能優化：使用預處理的數據類型
+                            if chart_key not in self.chart_types_cache and 'point_val' in raw_df.columns:
+                                self.chart_types_cache[chart_key] = determine_data_type(raw_df['point_val'].dropna())
                             data_type = self.chart_types_cache.get(chart_key, 'continuous')
                             chart_info = chart_info.copy()  # 避免修改原始數據
                             chart_info['data_type'] = data_type
@@ -4377,18 +4426,9 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                                 print(f" - 預處理後資料 shape: {processed_df.shape}")
                                 print(f" - 準備分析圖表: {group_name}/{chart_name}")
 
-                                # 性能優化：減少假進度條的步數，降低 GUI 更新頻率
-                                fake_steps = 5  # 從 10 減少到 5
-                                for fake_step in range(fake_steps):
-                                    # 調整進度計算：20%已用於預處理，剩餘80%用於圖表處理
-                                    progress_base = 20 + int(((i / total_charts_count) * 80))
-                                    progress_step = int((fake_step / fake_steps) * (80 / total_charts_count))
-                                    percent = min(100, progress_base + progress_step)
-                                    self.progress_bar.setValue(percent)
-                                    self.progress_bar.setFormat(f"{percent}% - {tr('processing')} {group_name}/{chart_name}")
-                                    if fake_step % 2 == 0:  # 只在偶數步驟更新 GUI
-                                        QtWidgets.QApplication.processEvents()
-                                    time.sleep(0.005)  # 從 0.01 減少到 0.005
+                                current_percent = self.progress_bar.value()
+                                self.progress_bar.setFormat(f"{current_percent}% - {tr('processing')} {group_name}/{chart_name}")
+                                QtWidgets.QApplication.processEvents()
 
                                 # 從設定中檢查是否使用互動式圖表和 Batch_ID 標籤
                                 use_interactive = self.oob_settings.get('use_interactive_charts', True)
@@ -4430,21 +4470,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     traceback.print_exc()
                     skipped_charts_count += 1
 
-                # 性能優化：減少 GUI 更新頻率
-                if i % 2 == 0:  # 每3個圖表更新一次進度條
-                    # 調整進度計算：20%已用於預處理，剩餘80%用於圖表處理
-                    percent = min(100, 20 + int(((i + 1) / total_charts_count) * 80))
-                    self.progress_bar.setValue(percent)
-                    self.progress_bar.setFormat(f"{percent}% - {processed_charts_count}/{total_charts_count} {tr('processed')}")
-                    QtWidgets.QApplication.processEvents()
+                percent = min(85, int(((i + 1) / max(total_charts_count, 1)) * 85))
+                self.progress_bar.setValue(max(self.progress_bar.value(), percent))
+                self.progress_bar.setFormat(f"{percent}% - {processed_charts_count}/{total_charts_count} {tr('processed')}")
+                QtWidgets.QApplication.processEvents()
 
-            # 最終更新進度條
-            self.progress_bar.setValue(100)
-            self.progress_bar.setFormat(f"100% - {tr('complete')}!")
+            self.progress_bar.setValue(max(self.progress_bar.value(), 85))
+            self.progress_bar.setFormat("85% - Saving results...")
             QtWidgets.QApplication.processEvents()
-            
-            # 3 秒後自動隱藏進度條
-            QtCore.QTimer.singleShot(3000, self.progress_bar.hide)
 
             self.update_summary_dashboard(total_charts_count, processed_charts_count, skipped_charts_count)
 
@@ -4453,6 +4486,11 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 QtWidgets.QMessageBox.information(self, "Processing Complete", "Results have been saved to result_with_images.xlsx")
             else:
                 QtWidgets.QMessageBox.information(self, "Processing Complete", "No charts were processed successfully to save.")
+
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat(f"100% - {tr('complete')}!")
+            QtWidgets.QApplication.processEvents()
+            QtCore.QTimer.singleShot(3000, self.progress_bar.hide)
 
             # 清理快取（可選）
             print(f"處理完成，清理快取。CSV 快取大小: {len(self.csv_cache)}")
@@ -4700,9 +4738,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 weekly_canvas = plot_weekly_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end_date, record_results=record_results, use_batch_id_labels=use_batch_id_labels, oob_info=oob_summary)
                 print(f" - analyze_chart: plot_weekly_spc_chart_interactive 完成")
                 
-                # 為了保持相容性，仍然保存靜態圖片版本供 Excel 使用
-                image_path, _ = plot_spc_chart(raw_df, chart_info, weekly_start_date, weekly_end_date)
-                weekly_image_path = plot_weekly_spc_chart(raw_df, chart_info, weekly_start_date, weekly_end_date)
+                image_path = make_output_image_path('SPC', group_name, chart_name)
+                weekly_image_path = make_output_image_path('Weekly_SPC', group_name, chart_name)
+                save_canvas_figure(spc_canvas, image_path)
+                save_canvas_figure(weekly_canvas, weekly_image_path)
                 
                 # 儲存 canvas 供 UI 使用
                 result['spc_canvas'] = spc_canvas
@@ -4984,7 +5023,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         # 產生 By Tool 圖表圖片供 Excel 使用
         by_tool_dir = os.path.join(resource_path('output'), 'by_tool_images')
         os.makedirs(by_tool_dir, exist_ok=True)
-        for result in self.results:
+        total_results = max(len(self.results), 1)
+        for idx, result in enumerate(self.results):
             result.setdefault('by_tool_color_path', 'N/A')
             result.setdefault('by_tool_group_path', 'N/A')
             raw_df = result.get('raw_df')
@@ -5009,6 +5049,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 result['by_tool_group_path'] = group_path
             except Exception as e:
                 print(f"[Warning] Failed to save By Tool charts: {e}")
+            finally:
+                if hasattr(self, 'progress_bar'):
+                    percent = min(95, 85 + int(((idx + 1) / total_results) * 10))
+                    self.progress_bar.setValue(max(self.progress_bar.value(), percent))
+                    self.progress_bar.setFormat(f"{percent}% - Saving by-tool charts {idx + 1}/{total_results}")
+                    QtWidgets.QApplication.processEvents()
 
         results_df = pd.DataFrame(self.results)
 
@@ -5030,7 +5076,15 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         results_df = results_df.replace([np.nan, np.inf, -np.inf], 'N/A')
 
         try:
+             if hasattr(self, 'progress_bar'):
+                 self.progress_bar.setValue(max(self.progress_bar.value(), 96))
+                 self.progress_bar.setFormat("96% - Writing Excel...")
+                 QtWidgets.QApplication.processEvents()
              save_results_to_excel(results_df)
+             if hasattr(self, 'progress_bar'):
+                 self.progress_bar.setValue(max(self.progress_bar.value(), 98))
+                 self.progress_bar.setFormat("98% - Excel saved")
+                 QtWidgets.QApplication.processEvents()
              print("Results saved to Excel.")
         except Exception as e:
              print(f"Error saving results to Excel: {e}")
