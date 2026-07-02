@@ -123,7 +123,7 @@ class Translations:
         
         # === Chart Processing ===
         "show_charts_gui": "Show Charts in GUI",
-        "show_by_tool_charts": "Show By Tool Analysis Charts",
+        "show_by_tool_charts": "Show Matching Group Analysis Charts",
         "use_interactive_charts": "Use Interactive Charts",
         "use_batch_id_labels": "Use Batch ID as X-axis Labels",
         "custom_time_range": "Custom Analysis Time Range",
@@ -493,7 +493,7 @@ class Translations:
         # === 主選單 ===
         "home": "首頁",
         "split_data": "資料拆分",
-        "oob_spc_system": "OOB / SPC 分析系統",
+        "oob_spc_system": "OOB / SPC 系統",
         "cpk_calculator": "Cpk 儀表板",
         "tool_matching": "機台一致性分析",
         "cl_tighten": "管制界線計算",
@@ -520,7 +520,7 @@ class Translations:
         
         # === 圖表處理 ===
         "show_charts_gui": "在介面顯示圖表",
-        "show_by_tool_charts": "顯示機台分析圖表 (By Tool)",
+        "show_by_tool_charts": "顯示 Matching Group 分析圖表",
         "use_interactive_charts": "使用互動式圖表",
         "use_batch_id_labels": "使用 Batch ID 作為 X 軸標籤",
         "custom_time_range": "自訂分析時間範圍",
@@ -915,7 +915,7 @@ class Translations:
         
         # === 차트 처리 ===
         "show_charts_gui": "인터페이스에 차트 표시",
-        "show_by_tool_charts": "장비 분석 차트 표시 (By Tool)",
+        "show_by_tool_charts": "Matching Group 분석 차트 표시",
         "use_interactive_charts": "인터랙티브 차트 사용",
         "use_batch_id_labels": "Batch ID를 X축 라벨로 사용",
         "custom_time_range": "사용자 정의 분석 시간 범위",

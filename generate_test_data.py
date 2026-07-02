@@ -9,10 +9,11 @@ import random
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
 plt.rcParams['axes.unicode_minus'] = False
 
-def generate_pattern_data(pattern, n_samples, base_value=10, sigma=1, decimals=2):
+def generate_pattern_data(pattern, n_samples, base_value=10, sigma=1, decimals=2, n_categories=None):
     """
     根據 pattern 生成對應的測試數據
     decimals 參數：控制小數點位數
+    n_categories 參數：Attribute pattern 的離散類別數量 (None 表示隨機 2~8)
     """
     np.random.seed(42 + hash(pattern) % 1000 + n_samples)
     
@@ -35,16 +36,18 @@ def generate_pattern_data(pattern, n_samples, base_value=10, sigma=1, decimals=2
         data = np.concatenate([data1, data2])
         
     elif pattern == "Attribute":
-        # 離散型數據
-        categories = [
-            round(base_value - sigma, decimals),
-            round(base_value, decimals),
-            round(base_value + sigma, decimals),
-            round(base_value + 2*sigma, decimals),
-            round(base_value - 2*sigma, decimals)
-        ]
-        weights = [0.1, 0.4, 0.3, 0.15, 0.05]
-        data = np.random.choice(categories, n_samples, p=weights)
+        # 離散型數據 - 類別數量可變
+        if n_categories is None:
+            n_categories = np.random.randint(2, 9)  # 隨機 2~8 種
+        n_categories = max(2, int(n_categories))
+        # 在 base_value ± 2*sigma 範圍內均勻分配類別值
+        step = (4 * sigma) / (n_categories - 1)
+        categories = list({round(base_value - 2*sigma + k * step, decimals) for k in range(n_categories)})
+        categories.sort()
+        n_categories = len(categories)  # 去重後重新計算
+        # 使用 Dirichlet 產生不均勻隨機權重
+        raw_weights = np.random.dirichlet(np.ones(n_categories) * 0.7)
+        data = np.random.choice(categories, n_samples, p=raw_weights)
         
     elif pattern == "Constant":
         data = np.full(n_samples, base_value)
@@ -224,8 +227,7 @@ def generate_test_charts():
                 "U-Shape", "Sawtooth", "Chaos"]
     
     sample_ranges = [
-        (4, 10), (11, 19), (20, 49), (50, 99), 
-        (100, 299), (300, 999), (1000, 3000)
+        (100, 300), (300, 600), (600, 1000), (1000, 2000)
     ]
     characteristics = ["Nominal", "Smaller", "Bigger"]
     
@@ -237,10 +239,11 @@ def generate_test_charts():
     charts_info = []
     
     for i in range(100):
-        pattern = random.choice(patterns)
+        pattern = "Attribute"
         sample_range = random.choice(sample_ranges)
         n_samples = random.randint(sample_range[0], sample_range[1])
-        characteristic = random.choice(characteristics)
+        characteristic = "Nominal"
+        n_cat = random.randint(5, 15)  # 每張圖隨機不同類別數
         
         # 隨機決定這張 Chart 的小數點位數 (1~5)
         n_decimals = np.random.choice(possible_decimals, p=decimal_weights)
@@ -250,8 +253,8 @@ def generate_test_charts():
         base_value = random.uniform(8, 12)
         sigma = random.uniform(0.5, 2.0)
         
-        # 生成數據 (帶入 decimals 參數)
-        data = generate_pattern_data(pattern, n_samples, base_value, sigma, decimals=n_decimals)
+        # 生成數據 (帶入 decimals 與 n_categories 參數)
+        data = generate_pattern_data(pattern, n_samples, base_value, sigma, decimals=n_decimals, n_categories=n_cat)
         
         # 設定 Target 和管制線 (也要 round 到相同位數)
         target = round(base_value, n_decimals)
