@@ -7,6 +7,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import oob_module_NGK_nostatic as oob_module
+from analysis_selection import filter_chart_info_for_analysis, warn_if_no_analysis_selection
 
 class SlidingToggleSwitch(QtWidgets.QAbstractButton):
     """iOS 風格滑動開關"""
@@ -499,7 +500,12 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
         
         # 創建進度對話框
-        total_charts = len(self.all_charts_info)
+        export_charts_info = filter_chart_info_for_analysis(self, self.all_charts_info)
+        if export_charts_info.empty:
+            warn_if_no_analysis_selection(self)
+            return
+
+        total_charts = len(export_charts_info)
         progress = QtWidgets.QProgressDialog(tr('exporting_charts'), tr('cancel'), 0, total_charts, self)
         progress.setWindowTitle(tr('export_progress'))
         progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
@@ -508,7 +514,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         
         rows = []
         chart_images = []
-        for idx, (_, chart_info) in enumerate(self.all_charts_info.iterrows()):
+        for idx, (_, chart_info) in enumerate(export_charts_info.iterrows()):
             # 更新進度
             progress.setValue(idx)
             progress.setLabelText(f"{tr('processing_chart')} {idx+1}/{total_charts}: {chart_info.get('GroupName', '')}@{chart_info.get('ChartName', '')}")
@@ -1099,6 +1105,11 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
 
         # --- 新增：進度條初始化 ---
+        self.all_charts_info = filter_chart_info_for_analysis(self, self.all_charts_info)
+        if self.all_charts_info.empty:
+            warn_if_no_analysis_selection(self)
+            return
+
         total_charts = len(self.all_charts_info)
         progress = QtWidgets.QProgressDialog(tr('running_analysis'), tr('cancel'), 0, total_charts, self)
         progress.setWindowTitle(tr('processing'))

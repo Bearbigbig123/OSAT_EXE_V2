@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import pandas as pd
 import numpy as np
 from PyQt6 import QtWidgets, QtGui, QtCore
@@ -9,6 +10,7 @@ import os
 import sys
 from difflib import SequenceMatcher
 from translations import tr, get_translator
+from analysis_selection import clear_selected_analysis_rows, set_selected_analysis_rows
 
 # ============================================================================
 # 1. Worker Thread (負責邏輯與資料檢查)
@@ -288,7 +290,7 @@ class DataValidatorWorker(QtCore.QThread):
                     csv_status = "Skipped (Excel Error)"
                 elif not has_error_in_row:
                     if not found_file:
-                        self.emit_log("Skipped", f"CSV ({chart_id})", "File Not Found", f"Expected: {expected_csv_filename}. Ensure it is in 'input/raw_charts'.", expected_csv_filename)
+                        self.emit_log("Skipped", f"CSV ({chart_id})", "File Not Found", f"Expected: {expected_csv_filename}. Ensure it is in 'input/raw_charts'.", expected_csv_filename, row_num=row_num)
                         skipped_count += 1
                         file_not_found_count += 1
                         csv_status = "File Not Found (Skipped)"
@@ -302,7 +304,7 @@ class DataValidatorWorker(QtCore.QThread):
                             df_csv = pd.read_csv(found_file, nrows=5)
                             
                             if df_csv.empty:
-                                self.emit_log("Unable to Execute", f"CSV ({chart_id})", "Empty CSV file", "CSV file is empty.", found_file, source="CSV")
+                                self.emit_log("Unable to Execute", f"CSV ({chart_id})", "Empty CSV file", "CSV file is empty.", found_file, source="CSV", row_num=row_num)
                                 unable_count += 1
                                 has_error_in_row = True
                                 file_format_error_count += 1
@@ -310,14 +312,14 @@ class DataValidatorWorker(QtCore.QThread):
                             else:
                                 # 檢查必要欄位
                                 if 'point_val' not in df_csv.columns:
-                                    self.emit_log("Unable to Execute", f"CSV ({chart_id})", "No 'point_val' column", "CSV file is missing 'point_val' column.", found_file, source="CSV")
+                                    self.emit_log("Unable to Execute", f"CSV ({chart_id})", "No 'point_val' column", "CSV file is missing 'point_val' column.", found_file, source="CSV", row_num=row_num)
                                     unable_count += 1
                                     has_error_in_row = True
                                     file_format_error_count += 1
                                     csv_status = "Missing point_val"
                                 
                                 if 'point_time' not in df_csv.columns:
-                                    self.emit_log("Unable to Execute", f"CSV ({chart_id})", "No 'point_time' column", "CSV file is missing 'point_time' column.", found_file, source="CSV")
+                                    self.emit_log("Unable to Execute", f"CSV ({chart_id})", "No 'point_time' column", "CSV file is missing 'point_time' column.", found_file, source="CSV", row_num=row_num)
                                     unable_count += 1
                                     has_error_in_row = True
                                     file_format_error_count += 1
@@ -341,7 +343,7 @@ class DataValidatorWorker(QtCore.QThread):
                                             print(f"  [DEBUG] 所有時間解析失敗，範例值: {example}")
                                             self.emit_log("Unable to Execute", f"CSV ({chart_id})", 
                                                           "Time Format Error", 
-                                                          "Time format error. Correct format should be '%Y/%m/%d %H:%M'.", found_file, source="CSV")
+                                                          "Time format error. Correct format should be '%Y/%m/%d %H:%M'.", found_file, source="CSV", row_num=row_num)
                                             unable_count += 1
                                             has_error_in_row = True
                                             file_format_error_count += 1
@@ -352,7 +354,7 @@ class DataValidatorWorker(QtCore.QThread):
                                             print(f"  [DEBUG] 部分時間解析失敗: {invalid_count}/{len(converted_times)}")
                                             self.emit_log("Unable to Execute", f"CSV ({chart_id})", 
                                                           f"Partial Invalid Times ({invalid_count}/{len(converted_times)})", 
-                                                          "Some time values are invalid.", found_file, source="CSV")
+                                                          "Some time values are invalid.", found_file, source="CSV", row_num=row_num)
                                             unable_count += 1
                                             has_error_in_row = True
                                             file_format_error_count += 1
@@ -365,7 +367,7 @@ class DataValidatorWorker(QtCore.QThread):
                                         print(f"  [DEBUG] 時間格式檢查出錯: {time_error}")
                                         self.emit_log("Unable to Execute", f"CSV ({chart_id})", 
                                                       f"Time Conversion Error: {str(time_error)}", 
-                                                      "Time format processing failed.", found_file, source="CSV")
+                                                      "Time format processing failed.", found_file, source="CSV", row_num=row_num)
                                         unable_count += 1
                                         has_error_in_row = True
                                         file_format_error_count += 1
@@ -374,13 +376,13 @@ class DataValidatorWorker(QtCore.QThread):
                         except PermissionError:
                             self.emit_log("Unable to Execute", f"CSV ({chart_id})", 
                                           "Permission denied: File is locked or in use", 
-                                          "⚠️ File is locked or in use. Please close this CSV file.", found_file, source="CSV")
+                                          "⚠️ File is locked or in use. Please close this CSV file.", found_file, source="CSV", row_num=row_num)
                             unable_count += 1
                             has_error_in_row = True
                             file_read_error_count += 1
                             csv_status = "Permission Error"
                         except Exception as e:
-                            self.emit_log("Unable to Execute", f"CSV ({chart_id})", f"Read Error: {str(e)}", "File read error, may be corrupted.", found_file, source="CSV")
+                            self.emit_log("Unable to Execute", f"CSV ({chart_id})", f"Read Error: {str(e)}", "File read error, may be corrupted.", found_file, source="CSV", row_num=row_num)
                             unable_count += 1
                             has_error_in_row = True
                             file_read_error_count += 1
@@ -390,7 +392,7 @@ class DataValidatorWorker(QtCore.QThread):
                 if not has_error_in_row and csv_status == "OK":
                     pass_count += 1
                     actual_filename = os.path.basename(found_file) if found_file else "Unknown"
-                    self.emit_log("Pass", chart_id, "All checks passed", f"CSV file '{actual_filename}' is ready for processing.", found_file, source="CSV")
+                    self.emit_log("Pass", chart_id, "All checks passed", f"CSV file '{actual_filename}' is ready for processing.", found_file, source="CSV", row_num=row_num)
 
                 # 每行處理完畢後更新進度 - 優化：降低更新頻率
                 update_interval = max(1, total_rows // 100)  # 每1%更新一次，至少每行
@@ -505,6 +507,10 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self._current_row_index = 0  # 追蹤當前表格行數
         self._batch_size = 25  # 每累積25筆錯誤就批次顯示一次
         
+        self.analysis_chart_rows = []
+        self.analysis_log_row_states = {}
+        self._loading_analysis_table = False
+
         self.init_ui()
         self.apply_styles()
         
@@ -521,8 +527,10 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         """主程式呼叫此方法來更新路徑"""
         self.excel_path = excel_path
         self.raw_data_dir = raw_data_dir
-        self.path_label.setText(f"{tr('checking', 'Checking')}: {os.path.basename(self.excel_path)}")
+        self.path_label.setText(f"{tr('chart_info_loaded', 'Chart info loaded')}: {os.path.basename(self.excel_path)}")
         self.btn_open_source.setEnabled(True)
+        self.reset_analysis_control_panel()
+        self.load_analysis_chart_selection()
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -584,6 +592,30 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
+        self.analysis_control_group = QtWidgets.QGroupBox()
+        self.analysis_control_group.setObjectName("AnalysisControlGroup")
+        control_layout = QtWidgets.QVBoxLayout(self.analysis_control_group)
+        control_layout.setContentsMargins(14, 18, 14, 12)
+        control_layout.setSpacing(10)
+
+        control_toolbar = QtWidgets.QHBoxLayout()
+        self.analysis_search_input = QtWidgets.QLineEdit()
+        self.analysis_search_input.setClearButtonEnabled(True)
+        self.analysis_search_input.textChanged.connect(self.filter_analysis_chart_table)
+        self.analysis_select_all_btn = QtWidgets.QPushButton()
+        self.analysis_select_all_btn.clicked.connect(lambda: self.set_visible_analysis_selection(True))
+        self.analysis_clear_btn = QtWidgets.QPushButton()
+        self.analysis_clear_btn.clicked.connect(lambda: self.set_visible_analysis_selection(False))
+        self.analysis_selection_label = QtWidgets.QLabel()
+        self.analysis_selection_label.setObjectName("AnalysisSelectionLabel")
+        control_toolbar.addWidget(self.analysis_search_input, 1)
+        control_toolbar.addWidget(self.analysis_select_all_btn)
+        control_toolbar.addWidget(self.analysis_clear_btn)
+        control_toolbar.addWidget(self.analysis_selection_label)
+        control_layout.addLayout(control_toolbar)
+
+        self.analysis_chart_table = None
+
         # 3. 進度條
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setTextVisible(False)
@@ -608,22 +640,25 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         stats_layout.addWidget(self.card_skip)
         stats_layout.addWidget(self.card_unable)
         layout.addLayout(stats_layout)
+        layout.addWidget(self.analysis_control_group)
 
         # 5. 詳細表格
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["", "", "", "", ""])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["", "", "", "", "", ""])
         
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Interactive)
         
         # 設定固定寬度給特定欄位
-        self.table.setColumnWidth(0, 120)  # Severity
-        self.table.setColumnWidth(4, 100)  # Open CSV
+        self.table.setColumnWidth(0, 80)  # Apply
+        self.table.setColumnWidth(1, 120)  # Severity
+        self.table.setColumnWidth(5, 100)  # Open CSV
         
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -631,12 +666,178 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
         self.table.setWordWrap(True)  # 啟用自動換行
+        self.table.itemChanged.connect(self.on_analysis_chart_item_changed)
         self.table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)  # 自動調整行高
         
         layout.addWidget(self.table)
         
         # 初始化 UI 文字
         self.refresh_ui_texts()
+
+    def reset_analysis_control_panel(self):
+        self.analysis_chart_rows = []
+        clear_selected_analysis_rows(self)
+        self.analysis_log_row_states = {}
+        if hasattr(self, "table"):
+            self.update_analysis_checkboxes_in_result_table()
+        if hasattr(self, "analysis_search_input"):
+            self.analysis_search_input.clear()
+            self.analysis_search_input.setEnabled(False)
+        if hasattr(self, "analysis_select_all_btn"):
+            self.analysis_select_all_btn.setEnabled(False)
+        if hasattr(self, "analysis_clear_btn"):
+            self.analysis_clear_btn.setEnabled(False)
+        self.update_analysis_selection_summary()
+
+    def load_analysis_chart_selection(self):
+        self.analysis_chart_rows = []
+        if not self.excel_path or not os.path.exists(self.excel_path):
+            self.reset_analysis_control_panel()
+            return
+
+        try:
+            df = pd.read_excel(self.excel_path, sheet_name="Chart", engine="openpyxl")
+        except Exception as e:
+            print(f"[Analysis Control] Failed to load chart list: {e}")
+            self.reset_analysis_control_panel()
+            return
+
+        for idx, row in df.iterrows():
+            excel_row = int(idx) + 2
+            self.analysis_chart_rows.append({
+                "excel_row": excel_row,
+                "group": str(row.get("GroupName", "")).strip(),
+                "chart": str(row.get("ChartName", "")).strip(),
+                "characteristics": str(row.get("Characteristics", "")).strip(),
+                "selected": True,
+            })
+
+        set_selected_analysis_rows(self, {row["excel_row"] for row in self.analysis_chart_rows})
+        self.analysis_log_row_states = {row["excel_row"]: True for row in self.analysis_chart_rows}
+        for row_data in self.analysis_chart_rows:
+            row_data["selected"] = True
+        self.analysis_search_input.setEnabled(True)
+        self.analysis_select_all_btn.setEnabled(True)
+        self.analysis_clear_btn.setEnabled(True)
+        self.update_analysis_checkboxes_in_result_table()
+        self.apply_filter()
+        self.update_analysis_selection_summary()
+
+    def populate_analysis_chart_table(self):
+        self.update_analysis_checkboxes_in_result_table()
+        self.apply_filter()
+        self.update_analysis_selection_summary()
+
+    def filter_analysis_chart_table(self):
+        self.apply_filter()
+
+    def set_visible_analysis_selection(self, selected):
+        self._loading_analysis_table = True
+        visible_rows = self.get_visible_analysis_excel_rows()
+        for row_data in self.analysis_chart_rows:
+            if row_data["excel_row"] not in visible_rows:
+                continue
+            row_data["selected"] = selected
+            self.analysis_log_row_states[row_data["excel_row"]] = selected
+        self._loading_analysis_table = False
+        self.update_analysis_checkboxes_in_result_table()
+        self.sync_analysis_selection_to_owner()
+
+    def on_analysis_chart_item_changed(self, item):
+        if self._loading_analysis_table or item.column() != 0:
+            return
+
+        excel_row = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if excel_row is None:
+            return
+        for row_data in self.analysis_chart_rows:
+            if row_data["excel_row"] == excel_row:
+                row_data["selected"] = item.checkState() == QtCore.Qt.CheckState.Checked
+                self.analysis_log_row_states[excel_row] = row_data["selected"]
+                break
+        self.sync_analysis_selection_to_owner()
+        self.update_analysis_checkboxes_in_result_table()
+
+    def sync_analysis_selection_to_owner(self):
+        selected_rows = {row["excel_row"] for row in self.analysis_chart_rows if row["selected"]}
+        set_selected_analysis_rows(self, selected_rows)
+        self.update_analysis_selection_summary()
+
+    def get_visible_analysis_excel_rows(self):
+        keyword = self.analysis_search_input.text().strip().lower() if hasattr(self, "analysis_search_input") else ""
+        if not keyword:
+            return {row["excel_row"] for row in self.analysis_chart_rows}
+        return {
+            row["excel_row"]
+            for row in self.analysis_chart_rows
+            if keyword in f"{row['group']} {row['chart']}".lower()
+        }
+
+    def extract_log_excel_row(self, log):
+        row_num = log.get("RowNum")
+        if row_num is not None:
+            try:
+                return int(row_num)
+            except (TypeError, ValueError):
+                return None
+
+        location = str(log.get("Location", ""))
+        match = re.search(r"Row\s+(\d+)", location)
+        if match:
+            return int(match.group(1))
+
+        chart_key = location
+        if location.startswith("CSV (") and location.endswith(")"):
+            chart_key = location[5:-1]
+        for row_data in self.analysis_chart_rows:
+            if chart_key == f"{row_data['group']}_{row_data['chart']}":
+                return row_data["excel_row"]
+        return None
+
+    def update_analysis_checkboxes_in_result_table(self):
+        if not hasattr(self, "table"):
+            return
+        self._loading_analysis_table = True
+        for row_idx in range(self.table.rowCount()):
+            self.populate_analysis_checkbox_for_table_row(row_idx)
+        self._loading_analysis_table = False
+
+    def populate_analysis_checkbox_for_table_row(self, table_row):
+        item = self.table.item(table_row, 0)
+        if item is None:
+            return
+        excel_row = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not self.analysis_chart_rows or excel_row not in self.analysis_log_row_states:
+            known_rows = {row["excel_row"] for row in self.analysis_chart_rows}
+            if excel_row not in known_rows:
+                item.setText("-")
+                item.setData(QtCore.Qt.ItemDataRole.CheckStateRole, None)
+                item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+                return
+            self.analysis_log_row_states[excel_row] = True
+
+        checked = self.analysis_log_row_states.get(excel_row, True)
+        item.setText("")
+        item.setFlags(
+            QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            | QtCore.Qt.ItemFlag.ItemIsEnabled
+            | QtCore.Qt.ItemFlag.ItemIsSelectable
+        )
+        item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
+
+    def update_analysis_selection_summary(self):
+        if not hasattr(self, "analysis_selection_label"):
+            return
+        if not self.analysis_chart_rows:
+            self.analysis_selection_label.setText(tr("analysis_targets_not_loaded", "Analysis targets not loaded"))
+            return
+        selected_count = sum(1 for row in self.analysis_chart_rows if row["selected"])
+        total_count = len(self.analysis_chart_rows)
+        self.analysis_selection_label.setText(
+            tr("analysis_selected_count", "Selected {selected}/{total}")
+            .replace("{selected}", str(selected_count))
+            .replace("{total}", str(total_count))
+        )
 
     def create_stat_card(self, title, value, color_code, key):
             card = QtWidgets.QWidget()
@@ -687,7 +888,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         # 標題與路徑
         self.title_label.setText(tr("data_health_monitor", "Data Health Monitor"))
         if self.excel_path:
-            self.path_label.setText(os.path.basename(self.excel_path))
+            self.path_label.setText(f"{tr('chart_info_loaded', 'Chart info loaded')}: {os.path.basename(self.excel_path)}")
         else:
             self.path_label.setText(tr("no_file_loaded", "No file loaded"))
         
@@ -697,6 +898,13 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.btn_export.setText(tr("export_report", "📁 Export Report"))
         
         # 統計卡片標題
+        if hasattr(self, "analysis_control_group"):
+            self.analysis_control_group.setTitle(tr("analysis_control_panel", "Analysis Control Panel"))
+            self.analysis_search_input.setPlaceholderText(tr("search_group_chart_placeholder", "Search GroupName / ChartName"))
+            self.analysis_select_all_btn.setText(tr("select_all", "Select All"))
+            self.analysis_clear_btn.setText(tr("clear_selection", "Clear Selection"))
+            self.update_analysis_selection_summary()
+
         if hasattr(self.card_total, 'title_label'):
             self.card_total.title_label.setText(tr("total_scanned", "Total Scanned"))
         if hasattr(self.card_pass, 'title_label'):
@@ -712,6 +920,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         
         # 表格欄位標題
         self.table.setHorizontalHeaderLabels([
+            tr("apply_to_analysis", "Apply"),
             tr("severity", "Severity"),
             tr("location", "Location"),
             tr("issue_description", "Issue Description"),
@@ -955,20 +1164,25 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
     def apply_filter(self):
         """根據 checkbox 狀態篩選表格顯示"""
         show_errors_only = self.chk_filter_errors.isChecked()
-        
+        visible_analysis_rows = self.get_visible_analysis_excel_rows() if self.analysis_chart_rows else None
+
         for row in range(self.table.rowCount()):
-            severity_item = self.table.item(row, 0)
+            severity_item = self.table.item(row, 1)
+            apply_item = self.table.item(row, 0)
+            hidden_by_search = False
+            if visible_analysis_rows is not None and apply_item is not None:
+                excel_row = apply_item.data(QtCore.Qt.ItemDataRole.UserRole)
+                hidden_by_search = excel_row is not None and excel_row not in visible_analysis_rows
             if severity_item:
                 severity_text = severity_item.text()
-                # 檢查是否包含 "Pass" 或 "✅"
                 is_pass = "Pass" in severity_text or "✅" in severity_text
-                # 如果勾選「只顯示錯誤」，就隱藏 Pass 行
-                self.table.setRowHidden(row, show_errors_only and is_pass)
+                self.table.setRowHidden(row, hidden_by_search or (show_errors_only and is_pass))
     
     def start_check(self):
         if not self.excel_path or not os.path.exists(self.excel_path):
             QtWidgets.QMessageBox.warning(self, tr("error", "Error"), tr("path_not_set", "Path not set properly."))
             return
+        self.load_analysis_chart_selection()
 
         self.btn_start.setEnabled(False)
         self.btn_export.setEnabled(False)
@@ -1141,6 +1355,16 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         else:
             icon, color_code = "ℹ️", "#3B82F6"
         
+        excel_row = self.extract_log_excel_row(log)
+        apply_item = QtWidgets.QTableWidgetItem()
+        apply_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        apply_item.setData(QtCore.Qt.ItemDataRole.UserRole, excel_row)
+        was_loading_analysis_table = self._loading_analysis_table
+        self._loading_analysis_table = True
+        self.table.setItem(row_index, 0, apply_item)
+        self.populate_analysis_checkbox_for_table_row(row_index)
+        self._loading_analysis_table = was_loading_analysis_table
+
         # [優化] 創建所有項目但延遲設定格式
         item_sev = QtWidgets.QTableWidgetItem(f"{icon} {sev_text}")
         item_sev.setForeground(QtGui.QColor(color_code))
@@ -1165,10 +1389,10 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         item_action.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter | QtCore.Qt.AlignmentFlag.AlignVCenter)
         
         # 直接設定到指定行，不插入
-        self.table.setItem(row_index, 0, item_sev)
-        self.table.setItem(row_index, 1, item_location)
-        self.table.setItem(row_index, 2, item_issue)
-        self.table.setItem(row_index, 3, item_action)
+        self.table.setItem(row_index, 1, item_sev)
+        self.table.setItem(row_index, 2, item_location)
+        self.table.setItem(row_index, 3, item_issue)
+        self.table.setItem(row_index, 4, item_action)
         
         # [優化] 簡化按鈕創建邏輯
         source = log.get('Source', 'Unknown')
@@ -1195,7 +1419,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
             """)
             btn_open.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             btn_open.clicked.connect(lambda: self.open_source_file())
-            self.table.setCellWidget(row_index, 4, btn_open)
+            self.table.setCellWidget(row_index, 5, btn_open)
         elif source == "CSV" and csv_path:
             # CSV 錯誤：開啟對應 CSV 檔案 - 修復路徑問題
             if os.path.exists(csv_path):
@@ -1220,7 +1444,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
                 # 修復lambda閉包問題 - 創建本地變數
                 file_path = str(csv_path)  # 確保是字符串
                 btn_open.clicked.connect(lambda checked, path=file_path: self.open_csv_file(path))
-                self.table.setCellWidget(row_index, 4, btn_open)
+                self.table.setCellWidget(row_index, 5, btn_open)
             else:
                 # CSV路徑無效時顯示錯誤
                 btn_error = QtWidgets.QPushButton("❌ Missing")
@@ -1228,11 +1452,11 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
                 btn_error.setFixedSize(80, 32)  # 保持一致的高度
                 btn_error.setStyleSheet("QPushButton { background-color: #EF4444; color: white; border: none; border-radius: 6px; font-size: 11px; padding: 3px 6px; }")
                 btn_error.setEnabled(False)
-                self.table.setCellWidget(row_index, 4, btn_error)
+                self.table.setCellWidget(row_index, 5, btn_error)
         else:
             item_na = QtWidgets.QTableWidgetItem(tr("n_a", "N/A"))
             item_na.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row_index, 4, item_na)
+            self.table.setItem(row_index, 5, item_na)
         
         # 設定行高以容納按鈕
         self.table.setRowHeight(row_index, 36)  # 稍微比按鈕高一點

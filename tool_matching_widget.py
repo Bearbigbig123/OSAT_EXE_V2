@@ -6,6 +6,7 @@ import pickle
 
 # Translation System
 from translations import get_translator, tr
+from analysis_selection import filter_chart_info_for_analysis, warn_if_no_analysis_selection
 
 # Check if openpyxl package is installed
 try:
@@ -580,6 +581,11 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             all_charts_info = pd.read_excel(info_path, sheet_name='Chart', engine='openpyxl')
         except Exception as e:
             self.status_label.setText(f"讀取 Excel 失敗: {e}")
+            return
+
+        all_charts_info = filter_chart_info_for_analysis(self, all_charts_info)
+        if all_charts_info.empty:
+            warn_if_no_analysis_selection(self)
             return
 
         self.progress_bar.setVisible(True)

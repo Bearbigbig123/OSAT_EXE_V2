@@ -3,6 +3,8 @@ import os
 os.environ["QT_API"] = "PyQt6" # 確認使用 PyQt6
 import re
 import json
+from dataclasses import dataclass, field
+from typing import Optional
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,6 +14,7 @@ import traceback
 from CL_limit_class import CLTightenCalculator
 # Translation System
 from translations import TranslationManager, get_translator, tr
+from analysis_selection import filter_chart_info_for_analysis, get_selected_analysis_rows, warn_if_no_analysis_selection
 # Excel 和圖片處理
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
@@ -184,43 +187,25 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         from translations import tr
         
         self.setWindowTitle(tr("chart_processing_settings"))
-        self.setMinimumWidth(600)
-        self.setMinimumHeight(400)
+        self.setMinimumWidth(760)
+        self.setMinimumHeight(440)
         
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(20, 20, 20, 20)
         
+        top_settings_layout = QtWidgets.QHBoxLayout()
+        top_settings_layout.setSpacing(14)
+        
         # === 圖表顯示設定 ===
-        display_group = QtWidgets.QGroupBox(tr("display_settings"))
-        display_layout = QtWidgets.QVBoxLayout(display_group)
+        self.display_group = QtWidgets.QGroupBox(tr("display_settings"))
+        display_layout = QtWidgets.QVBoxLayout(self.display_group)
         display_layout.setSpacing(10)
         
         self.display_gui_checkbox = ToggleSwitch(label_text=tr("show_charts_gui"))
         self.display_gui_checkbox.setChecked(True)
         display_layout.addWidget(self.display_gui_checkbox)
 
-        self.show_by_tool_checkbox = ToggleSwitch(label_text=tr("show_by_tool_charts"))
-        self.show_by_tool_checkbox.setChecked(False)
-        display_layout.addWidget(self.show_by_tool_checkbox)
-
-        self.run_by_tool_median_shift_checkbox = ToggleSwitch(label_text=tr("run_by_tool_median_shift", "Run Tool Median Shift"))
-        self.run_by_tool_median_shift_checkbox.setChecked(False)
-        display_layout.addWidget(self.run_by_tool_median_shift_checkbox)
-
-        k_threshold_layout = QHBoxLayout()
-        k_threshold_layout.setSpacing(10)
-        self.by_tool_median_shift_k_label = QLabel(tr("by_tool_median_shift_k_threshold", "Tool Median Shift K:"))
-        self.by_tool_median_shift_k_label.setMaximumWidth(220)
-        self.by_tool_median_shift_k_combo = QtWidgets.QComboBox()
-        self.by_tool_median_shift_k_combo.addItems(["1.33", "1.5", "1.67", "1.83", "2"])
-        self.by_tool_median_shift_k_combo.setCurrentText("1.67")
-        self.by_tool_median_shift_k_combo.setFixedWidth(100)
-        k_threshold_layout.addWidget(self.by_tool_median_shift_k_label)
-        k_threshold_layout.addWidget(self.by_tool_median_shift_k_combo)
-        k_threshold_layout.addStretch()
-        display_layout.addLayout(k_threshold_layout)
-        
         self.interactive_charts_checkbox = ToggleSwitch(label_text=tr("use_interactive_charts"))
         self.interactive_charts_checkbox.setChecked(True)
         display_layout.addWidget(self.interactive_charts_checkbox)
@@ -228,12 +213,43 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.use_batch_id_labels_checkbox = ToggleSwitch(label_text=tr("use_batch_id_labels"))
         self.use_batch_id_labels_checkbox.setChecked(False)
         display_layout.addWidget(self.use_batch_id_labels_checkbox)
+        display_layout.addStretch()
         
-        main_layout.addWidget(display_group)
+        self.tool_analysis_group = QtWidgets.QGroupBox(tr("tool_analysis_settings", "Tool / Matching Analysis"))
+        tool_layout = QtWidgets.QVBoxLayout(self.tool_analysis_group)
+        tool_layout.setSpacing(10)
+        
+        self.show_by_tool_checkbox = ToggleSwitch(label_text=tr("show_by_tool_charts"))
+        self.show_by_tool_checkbox.setChecked(False)
+        tool_layout.addWidget(self.show_by_tool_checkbox)
+
+        self.run_by_tool_median_shift_checkbox = ToggleSwitch(label_text=tr("run_by_tool_median_shift", "Run Tool Median Shift"))
+        self.run_by_tool_median_shift_checkbox.setChecked(False)
+        tool_layout.addWidget(self.run_by_tool_median_shift_checkbox)
+
+        k_threshold_layout = QHBoxLayout()
+        k_threshold_layout.setSpacing(10)
+        self.by_tool_median_shift_k_label = QLabel(tr("by_tool_median_shift_k_threshold", "Tool Median Shift K:"))
+        self.by_tool_median_shift_k_label.setMinimumWidth(150)
+        self.by_tool_median_shift_k_combo = QtWidgets.QComboBox()
+        self.by_tool_median_shift_k_combo.addItems(["1.33", "1.5", "1.67", "1.83", "2"])
+        self.by_tool_median_shift_k_combo.setCurrentText("1.67")
+        self.by_tool_median_shift_k_combo.setFixedWidth(100)
+        self.by_tool_median_shift_k_combo.setEnabled(False)
+        self.run_by_tool_median_shift_checkbox.stateChanged.connect(self.by_tool_median_shift_k_combo.setEnabled)
+        k_threshold_layout.addWidget(self.by_tool_median_shift_k_label)
+        k_threshold_layout.addWidget(self.by_tool_median_shift_k_combo)
+        k_threshold_layout.addStretch()
+        tool_layout.addLayout(k_threshold_layout)
+        tool_layout.addStretch()
+        
+        top_settings_layout.addWidget(self.display_group, 1)
+        top_settings_layout.addWidget(self.tool_analysis_group, 1)
+        main_layout.addLayout(top_settings_layout)
         
         # === 時間範圍設定 ===
-        time_range_group = QtWidgets.QGroupBox(tr("custom_time_range"))
-        time_range_layout = QtWidgets.QVBoxLayout(time_range_group)
+        self.time_range_group = QtWidgets.QGroupBox(tr("custom_time_range"))
+        time_range_layout = QtWidgets.QVBoxLayout(self.time_range_group)
         time_range_layout.setSpacing(10)
         
         # 啟用/停用自定義時間範圍
@@ -343,7 +359,7 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.this_month_btn.clicked.connect(self._set_this_month_range)
         self.last_month_btn.clicked.connect(self._set_last_month_range)
         
-        main_layout.addWidget(time_range_group)
+        main_layout.addWidget(self.time_range_group)
         
         # 按鈕
         button_layout = QHBoxLayout()
@@ -449,6 +465,9 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         """ 更新 UI 文字 """
         from translations import tr
         self.setWindowTitle(tr("chart_processing_settings"))
+        self.display_group.setTitle(tr("display_settings"))
+        self.tool_analysis_group.setTitle(tr("tool_analysis_settings", "Tool / Matching Analysis"))
+        self.time_range_group.setTitle(tr("custom_time_range"))
         self.display_gui_checkbox.setText(tr("show_charts_gui"))
         self.show_by_tool_checkbox.setText(tr("show_by_tool_charts"))
         self.run_by_tool_median_shift_checkbox.setText(tr("run_by_tool_median_shift", "Run Tool Median Shift"))
@@ -3648,6 +3667,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.raw_data_directory = resource_path('input/raw_charts/')
         self.image_path = resource_path('image.png')
         self.results = []
+        self.selected_analysis_chart_rows = None
 
         # 翻譯系統
         self.translator = get_translator()
@@ -3765,9 +3785,11 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.setWindowTitle(tr("app_title"))
         screen = QtWidgets.QApplication.primaryScreen()
         available_geometry = screen.availableGeometry()  # 使用 availableGeometry() 避開工作列
-        w = int(available_geometry.width() * 0.9)  # 改為螢幕寬度的85%
-        h = int(available_geometry.height() * 0.80)  # 改為螢幕高度的80%
-        self.setGeometry(0, 0, w, h)
+        w = int(available_geometry.width() * 0.88)
+        h = int(available_geometry.height() * 0.72)
+        x = available_geometry.x() + max((available_geometry.width() - w) // 2, 0)
+        y = available_geometry.y() + max((available_geometry.height() - h) // 2, 0)
+        self.setGeometry(x, y, w, h)
         self.setStyleSheet("""
             * {
                 color: #000957;
@@ -4339,8 +4361,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         """
         這個方法現在會創建並返回你的 SplitDataWidget 實例。
         """
-        widget = SplitDataWidget(self) # 創建 SplitDataWidget 的實例，並將 MainWindow 作為其父物件
-        return widget
+        widget = SplitDataPreviewWidget(self)
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setWidget(widget)
+        return scroll
     
     def _create_cpk_calculation_page(self):
         from spc_cpk_dashboard import SPCCpkDashboard
@@ -4925,6 +4951,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             self.clear_image_grid()
 
             all_charts_info = load_chart_information(self.filepath)
+            all_charts_info = filter_chart_info_for_analysis(self, all_charts_info)
+            if all_charts_info.empty:
+                warn_if_no_analysis_selection(self)
+                return
             total_charts_count = len(all_charts_info)
             self.progress_bar.setMaximum(100)
             self.pump_ui_status("0% - Building raw file index...", force=True)
@@ -6762,6 +6792,837 @@ class SplitDataWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Error", "No files were successfully processed.")
             self.status_label.setText("Processing failed: No files were successfully processed.")
 
+class SplitDataPreviewWidget(SplitDataWidget):
+    COMMON_ENCODINGS = ["utf-8-sig", "utf-8", "big5", "cp950", "latin1", "cp1252"]
+    PREVIEW_ROW_LIMIT = 100
+
+    @dataclass
+    class ValidationIssue:
+        severity: str
+        row_number: Optional[int]
+        column_name: str
+        message: str
+        suggestion: str
+        preview_row: Optional[int] = None
+        preview_col: Optional[int] = None
+
+    @dataclass
+    class SplitPlanSummary:
+        output_file_count: int = 0
+        chart_column_count: int = 0
+
+    @dataclass
+    class PreviewResult:
+        file_path: str
+        encoding: str
+        mode: str
+        raw_preview_df: pd.DataFrame
+        normalized_preview_df: pd.DataFrame
+        export_frames: list
+        issues: list
+        summary: "SplitDataPreviewWidget.SplitPlanSummary"
+        data_row_count: int
+        column_count: int
+        blocking_error_count: int
+        warning_count: int
+        row_issue_positions: set
+        cell_issue_positions: set
+        header_issue_positions: set
+
+        @property
+        def is_ready(self):
+            return self.blocking_error_count == 0
+
+    def __init__(self, parent=None):
+        QtWidgets.QWidget.__init__(self, parent)
+        self.preview_results = []
+        self.preview_results_by_path = {}
+        self._current_processing_mode = "Type3_Horizontal"
+        self._validated_mode = None
+        self.init_ui()
+        self.apply_styles()
+        TranslationManager().register_observer(self)
+
+    def init_ui(self):
+        main_layout = QtWidgets.QGridLayout(self)
+        main_layout.setContentsMargins(30, 30, 30, 30)
+        main_layout.setSpacing(15)
+
+        self.description_label = QtWidgets.QLabel(
+            f"<h2 style='color:#34495E;'>{tr('split_data_title')}</h2>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_description')}</p>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_type2_desc')}</p>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_type3_desc')}</p>"
+        )
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        main_layout.addWidget(self.description_label, 0, 0, 1, 2)
+
+        self.input_group_box = QtWidgets.QGroupBox(tr('select_input_files'))
+        input_layout = QtWidgets.QFormLayout(self.input_group_box)
+        input_layout.setContentsMargins(15, 20, 15, 15)
+        input_layout.setHorizontalSpacing(10)
+        self.input_path_entry = QtWidgets.QLineEdit()
+        self.input_path_entry.setPlaceholderText(tr('select_csv_files'))
+        self.input_path_entry.setReadOnly(True)
+        self.input_button = QtWidgets.QPushButton(tr('browse'))
+        self.input_button.clicked.connect(self.select_input_files)
+        input_row_layout = QtWidgets.QHBoxLayout()
+        input_row_layout.addWidget(self.input_path_entry)
+        input_row_layout.addWidget(self.input_button)
+        input_layout.addRow(input_row_layout)
+        main_layout.addWidget(self.input_group_box, 1, 0, 1, 2)
+
+        self.mode_group_box = QtWidgets.QGroupBox(tr('select_processing_mode'))
+        mode_layout = QtWidgets.QHBoxLayout(self.mode_group_box)
+        mode_layout.setContentsMargins(15, 20, 15, 15)
+        self.mode_label = QtWidgets.QLabel(tr('select_file_type'))
+        self.processing_mode_combo = QtWidgets.QComboBox()
+        self.processing_mode_combo.addItems([tr('type3_horizontal'), tr('type2_vertical')])
+        self.processing_mode_combo.setFixedWidth(250)
+        self.processing_mode_combo.currentIndexChanged.connect(self._update_processing_mode)
+        mode_layout.addWidget(self.mode_label)
+        mode_layout.addWidget(self.processing_mode_combo)
+        mode_layout.addStretch(1)
+        example_buttons_layout = QtWidgets.QVBoxLayout()
+        self.download_example_button = QtWidgets.QPushButton(tr('type3_example'))
+        self.download_example_button.setFixedSize(150, 36)
+        self.download_example_button.clicked.connect(self.download_type3_example)
+        example_buttons_layout.addWidget(self.download_example_button)
+        self.download_type2_example_button = QtWidgets.QPushButton(tr('type2_example'))
+        self.download_type2_example_button.setFixedSize(150, 36)
+        self.download_type2_example_button.clicked.connect(self.download_type2_example)
+        example_buttons_layout.addWidget(self.download_type2_example_button)
+        mode_layout.addLayout(example_buttons_layout)
+        main_layout.addWidget(self.mode_group_box, 2, 0, 1, 2)
+
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch(1)
+        button_layout.addStretch(1)
+        main_layout.addLayout(button_layout, 3, 0, 1, 2)
+
+        self.preview_group_box = QtWidgets.QGroupBox(tr("preview_validate_title", "3. Data Preview"))
+        preview_layout = QtWidgets.QVBoxLayout(self.preview_group_box)
+        preview_layout.setContentsMargins(15, 20, 15, 15)
+        preview_layout.setSpacing(12)
+        preview_top_layout = QtWidgets.QHBoxLayout()
+        self.preview_file_combo = QtWidgets.QComboBox()
+        self.preview_file_combo.setMinimumWidth(280)
+        self.preview_file_combo.currentIndexChanged.connect(self._on_preview_file_changed)
+        preview_top_layout.addWidget(self.preview_file_combo)
+        preview_top_layout.addStretch(1)
+        self.preview_result_label = QtWidgets.QLabel(tr("preview_data", "Preview Data"))
+        preview_top_layout.addWidget(self.preview_result_label)
+        preview_layout.addLayout(preview_top_layout)
+
+        self.file_summary_card = QtWidgets.QFrame()
+        self.file_summary_card.setObjectName("summaryCard")
+        summary_layout = QtWidgets.QGridLayout(self.file_summary_card)
+        summary_layout.setContentsMargins(15, 12, 15, 12)
+        summary_layout.setHorizontalSpacing(18)
+        summary_layout.setVerticalSpacing(8)
+        self.file_summary_title = QtWidgets.QLabel(tr("file_summary", "File Summary"))
+        self.file_summary_title.setObjectName("summaryTitle")
+        summary_layout.addWidget(self.file_summary_title, 0, 0, 1, 4)
+        self.summary_labels = {}
+        self.summary_key_labels = {}
+        summary_fields = [
+            ("file", tr("file_name", "File")),
+            ("encoding", tr("detected_encoding", "Encoding")),
+            ("mode", tr("mode", "Mode")),
+            ("rows", tr("data_rows", "Rows")),
+            ("columns", tr("columns_count", "Columns")),
+            ("outputs", tr("split_outputs", "Split Outputs")),
+            ("charts", tr("chart_columns", "Chart Columns")),
+            ("ready", tr("ready_to_process", "Ready to Process")),
+        ]
+        for idx, (key, label_text) in enumerate(summary_fields):
+            row = 1 + idx // 4
+            col = idx % 4
+            item_frame = QtWidgets.QFrame()
+            item_frame.setObjectName("summaryItem")
+            item_layout = QtWidgets.QVBoxLayout(item_frame)
+            item_layout.setContentsMargins(12, 10, 12, 10)
+            item_layout.setSpacing(4)
+
+            label = QtWidgets.QLabel(label_text)
+            label.setObjectName("summaryKey")
+            value = QtWidgets.QLabel("-")
+            value.setObjectName("summaryValue")
+            value.setWordWrap(True)
+            if key == "ready":
+                value.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                value.setWordWrap(False)
+                value.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Fixed)
+            item_layout.addWidget(label)
+            if key == "ready":
+                item_layout.addWidget(value, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+            else:
+                item_layout.addWidget(value)
+            summary_layout.addWidget(item_frame, row, col)
+            self.summary_labels[key] = value
+            self.summary_key_labels[key] = label
+        preview_layout.addWidget(self.file_summary_card)
+
+        self.preview_table = QtWidgets.QTableWidget()
+        self.preview_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.preview_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        preview_layout.addWidget(self.preview_table)
+        main_layout.addWidget(self.preview_group_box, 4, 0, 1, 2)
+
+        self.validation_group_box = QtWidgets.QGroupBox(tr("validation_summary", "Validation Summary"))
+        validation_layout = QtWidgets.QVBoxLayout(self.validation_group_box)
+        validation_layout.setContentsMargins(15, 20, 15, 15)
+        validation_layout.setSpacing(12)
+        stats_layout = QtWidgets.QHBoxLayout()
+        self.validation_stats = {}
+        self.validation_stat_titles = {}
+        for key, title, color in [
+            ("files", tr("preview_files", "Files"), "#344CB7"),
+            ("blocking", tr("blocking_errors", "Blocking Errors"), "#DC2626"),
+            ("warnings", tr("warnings", "Warnings"), "#D97706"),
+            ("ready", tr("ready_to_process", "Ready to Process"), "#059669"),
+        ]:
+            card = QtWidgets.QFrame()
+            card.setObjectName("validationCard")
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(15, 12, 15, 12)
+            title_label = QtWidgets.QLabel(title)
+            title_label.setObjectName("summaryTitle")
+            value_label = QtWidgets.QLabel("0")
+            value_label.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {color};")
+            card_layout.addWidget(title_label)
+            card_layout.addWidget(value_label)
+            stats_layout.addWidget(card)
+            self.validation_stats[key] = value_label
+            self.validation_stat_titles[key] = title_label
+        validation_layout.addLayout(stats_layout)
+        self.validation_status_label = QtWidgets.QLabel(tr("rows_with_issues", "Rows with Issues"))
+        self.validation_status_label.setWordWrap(True)
+        validation_layout.addWidget(self.validation_status_label)
+        self.validation_table = QtWidgets.QTableWidget()
+        self.validation_table.setColumnCount(4)
+        self.validation_table.setHorizontalHeaderLabels([
+            tr("row_label", "Row"),
+            tr("column_label", "Column"),
+            tr("issue_description", "Issue"),
+            tr("suggested_action", "Suggested Action"),
+        ])
+        self.validation_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.validation_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.validation_table.setAlternatingRowColors(True)
+        self.validation_table.verticalHeader().setVisible(False)
+        self.validation_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.validation_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.validation_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.validation_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        validation_layout.addWidget(self.validation_table)
+        main_layout.addWidget(self.validation_group_box, 5, 0, 1, 2)
+
+        bottom_action_layout = QtWidgets.QHBoxLayout()
+        bottom_action_layout.addStretch(1)
+        self.process_button = QtWidgets.QPushButton(tr('start_processing'))
+        self.process_button.setFixedSize(220, 52)
+        self.process_button.clicked.connect(self.run_processing)
+        self.process_button.setObjectName("processButton")
+        self.process_button.setEnabled(False)
+        bottom_action_layout.addWidget(self.process_button)
+        bottom_action_layout.addStretch(1)
+        main_layout.addLayout(bottom_action_layout, 6, 0, 1, 2)
+
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat(tr('processing_progress'))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.status_label = QtWidgets.QLabel(tr('ready'))
+        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: #607D8B; font-style: italic;")
+        main_layout.addWidget(self.progress_bar, 7, 0, 1, 2)
+        main_layout.addWidget(self.status_label, 8, 0, 1, 2)
+        main_layout.setRowStretch(9, 1)
+        self._refresh_validation_summary()
+
+    def refresh_ui_texts(self):
+        self.description_label.setText(
+            f"<h2 style='color:#34495E;'>{tr('split_data_title')}</h2>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_description')}</p>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_type2_desc')}</p>"
+            f"<p style='color:#5D6D7E;'>{tr('split_data_type3_desc')}</p>"
+        )
+        self.input_group_box.setTitle(tr('select_input_files'))
+        self.mode_group_box.setTitle(tr('select_processing_mode'))
+        self.preview_group_box.setTitle(tr("preview_validate_title", "3. Data Preview"))
+        self.validation_group_box.setTitle(tr("validation_summary", "Validation Summary"))
+        self.input_path_entry.setPlaceholderText(tr('select_csv_files'))
+        self.input_button.setText(tr('browse'))
+        self.mode_label.setText(tr('select_file_type'))
+        current_mode_index = self.processing_mode_combo.currentIndex()
+        self.processing_mode_combo.blockSignals(True)
+        self.processing_mode_combo.clear()
+        self.processing_mode_combo.addItems([tr('type3_horizontal'), tr('type2_vertical')])
+        self.processing_mode_combo.setCurrentIndex(max(current_mode_index, 0))
+        self.processing_mode_combo.blockSignals(False)
+        self.download_example_button.setText(tr('type3_example'))
+        self.download_type2_example_button.setText(tr('type2_example'))
+        self.process_button.setText(tr('start_processing'))
+        self.preview_result_label.setText(tr("preview_data", "Preview Data"))
+        self.file_summary_title.setText(tr("file_summary", "File Summary"))
+        summary_field_texts = {
+            "file": tr("file_name", "File"),
+            "encoding": tr("detected_encoding", "Encoding"),
+            "mode": tr("mode", "Mode"),
+            "rows": tr("data_rows", "Rows"),
+            "columns": tr("columns_count", "Columns"),
+            "outputs": tr("split_outputs", "Split Outputs"),
+            "charts": tr("chart_columns", "Chart Columns"),
+            "ready": tr("ready_to_process", "Ready to Process"),
+        }
+        for key, text in summary_field_texts.items():
+            if key in self.summary_key_labels:
+                self.summary_key_labels[key].setText(text)
+        validation_stat_texts = {
+            "files": tr("preview_files", "Files"),
+            "blocking": tr("blocking_errors", "Blocking Errors"),
+            "warnings": tr("warnings", "Warnings"),
+            "ready": tr("ready_to_process", "Ready to Process"),
+        }
+        for key, text in validation_stat_texts.items():
+            if key in self.validation_stat_titles:
+                self.validation_stat_titles[key].setText(text)
+        self.validation_table.setHorizontalHeaderLabels([
+            tr("row_label", "Row"),
+            tr("column_label", "Column"),
+            tr("issue_description", "Issue"),
+            tr("suggested_action", "Suggested Action"),
+        ])
+        self.progress_bar.setFormat(tr('processing_progress'))
+        self._refresh_validation_summary()
+        current_index = self.preview_file_combo.currentIndex()
+        if 0 <= current_index < len(self.preview_results):
+            self._display_preview_result(self.preview_results[current_index])
+
+    def apply_styles(self):
+        self.setStyleSheet("""
+            QWidget {
+                font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
+                font-size: 14px;
+                color: #333;
+            }
+            QLabel {
+                color: #333;
+                background-color: transparent;
+            }
+            QGroupBox {
+                font-size: 15px;
+                font-weight: bold;
+                color: #2C3E50;
+                margin-top: 10px;
+                border: 1px solid #D1D1D1;
+                border-radius: 8px;
+                padding-top: 20px;
+                padding-bottom: 10px;
+                background-color: #F8FAFC;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+                margin-left: 5px;
+                color: #2C3E50;
+            }
+            QLineEdit, QComboBox {
+                border: 1px solid #BDC3C7;
+                border-radius: 5px;
+                padding: 8px;
+                background-color: #ECF0F1;
+                selection-background-color: #3498DB;
+            }
+            QPushButton {
+                background-color: #344CB7;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #2980B9;
+            }
+            QPushButton:pressed {
+                background-color: #1F618D;
+            }
+            #previewButton {
+                background-color: #0F766E;
+            }
+            #previewButton:hover {
+                background-color: #0D9488;
+            }
+            #previewButton:pressed {
+                background-color: #115E59;
+            }
+            #summaryCard, #validationCard {
+                background-color: #FFFFFF;
+                border: 1px solid #DCE6F2;
+                border-radius: 10px;
+            }
+            #summaryItem {
+                background-color: #F8FAFC;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+            }
+            #summaryCard QLabel, #validationCard QLabel {
+                background-color: transparent;
+            }
+            #summaryTitle {
+                color: #34495E;
+                font-weight: bold;
+            }
+            #summaryKey {
+                color: #64748B;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #summaryValue {
+                color: #1E293B;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            #summaryValueOk {
+                color: #047857;
+                background-color: #DCFCE7;
+                border: none;
+                border-radius: 999px;
+                padding: 4px 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            #summaryValueBlocked {
+                color: #B91C1C;
+                background-color: #FEE2E2;
+                border: none;
+                border-radius: 999px;
+                padding: 4px 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QProgressBar {
+                border: 1px solid #BDC3C7;
+                border-radius: 5px;
+                text-align: center;
+                background-color: #ECF0F1;
+            }
+            QProgressBar::chunk {
+                background-color: #344CB7;
+                border-radius: 5px;
+            }
+            QTableWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #DCE6F2;
+                border-radius: 8px;
+                gridline-color: #E5E7EB;
+            }
+            QHeaderView::section {
+                background-color: #F8FAFC;
+                border: none;
+                border-bottom: 1px solid #DCE6F2;
+                padding: 8px;
+                font-weight: bold;
+            }
+        """)
+
+    def _update_processing_mode(self, index):
+        self._current_processing_mode = "Type3_Horizontal" if index == 0 else "Type2_Vertical"
+        self._reset_preview_state()
+        if self.input_path_entry.text().strip():
+            self.preview_and_validate_files()
+        else:
+            self.status_label.setText(tr('ready'))
+
+    def select_input_files(self):
+        file_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, tr("select_input_csv_files", "Select Input CSV Files"), "", "CSV Files (*.csv);;All Files (*.*)"
+        )
+        if file_paths:
+            self.input_path_entry.setText(";".join(file_paths))
+            self._reset_preview_state()
+            self.status_label.setText(tr("auto_previewing", "Auto previewing imported data..."))
+            self.preview_and_validate_files()
+
+    def _reset_preview_state(self):
+        self.preview_results = []
+        self.preview_results_by_path = {}
+        self._validated_mode = None
+        self.preview_file_combo.blockSignals(True)
+        self.preview_file_combo.clear()
+        self.preview_file_combo.blockSignals(False)
+        self.preview_table.clear()
+        self.preview_table.setRowCount(0)
+        self.preview_table.setColumnCount(0)
+        self.validation_table.setRowCount(0)
+        for label in self.summary_labels.values():
+            label.setText("-")
+        self._refresh_validation_summary()
+        self._refresh_action_state()
+
+    def _refresh_action_state(self):
+        ready = bool(self.preview_results) and self._validated_mode == self._current_processing_mode and all(result.is_ready for result in self.preview_results)
+        self.process_button.setEnabled(ready)
+
+    def _refresh_validation_summary(self):
+        total_files = len(self.preview_results)
+        total_blocking = sum(result.blocking_error_count for result in self.preview_results)
+        total_warnings = sum(result.warning_count for result in self.preview_results)
+        ready_files = sum(1 for result in self.preview_results if result.is_ready)
+        if hasattr(self, "validation_stats"):
+            self.validation_stats["files"].setText(str(total_files))
+            self.validation_stats["blocking"].setText(str(total_blocking))
+            self.validation_stats["warnings"].setText(str(total_warnings))
+            self.validation_stats["ready"].setText(f"{ready_files}/{total_files}" if total_files else "0")
+        if hasattr(self, "validation_status_label"):
+            if not self.preview_results:
+                self.validation_status_label.setText(tr("rows_with_issues", "Rows with Issues"))
+            elif total_blocking > 0:
+                self.validation_status_label.setText(tr("cannot_process_until_fixed", "Cannot process until errors are fixed."))
+            else:
+                self.validation_status_label.setText(tr("ready_to_process", "Ready to Process"))
+
+    def _read_csv_with_encoding_fallback(self, filepath, header_val=None):
+        for enc in self.COMMON_ENCODINGS:
+            try:
+                return pd.read_csv(filepath, header=header_val, encoding=enc), enc
+            except (UnicodeDecodeError, pd.errors.ParserError):
+                continue
+        raise ValueError(f"Unable to decode file '{os.path.basename(filepath)}' using supported encodings.")
+
+    def _build_issue(self, severity, row_number, column_name, message, suggestion, preview_row=None, preview_col=None):
+        return self.ValidationIssue(severity, row_number, column_name, message, suggestion, preview_row, preview_col)
+
+    def _format_datetime_series(self, series):
+        parsed = pd.to_datetime(series, errors='coerce')
+        formatted = pd.Series("", index=series.index, dtype=object)
+        valid_mask = parsed.notna()
+        if valid_mask.any():
+            formatted.loc[valid_mask] = parsed.loc[valid_mask].dt.strftime('%Y/%m/%d %H:%M')
+        return parsed, formatted
+
+    def _build_type2_preview(self, input_path):
+        df, encoding = self._read_csv_with_encoding_fallback(input_path, header_val='infer')
+        raw_preview_df = df.head(self.PREVIEW_ROW_LIMIT).copy()
+        normalized_df = df.copy()
+        issues = []
+        export_frames = []
+        row_positions = set()
+        cell_positions = set()
+        header_positions = set()
+        required_cols = ['GroupName', 'ChartName', 'point_time', 'point_val']
+        missing_cols = [col for col in required_cols if col not in normalized_df.columns]
+        for missing in missing_cols:
+            issues.append(self._build_issue("error", 1, missing, f"Missing required column: {missing}", "Add the missing column before processing."))
+        if not missing_cols:
+            invalid_group = normalized_df['GroupName'].isna() | normalized_df['GroupName'].astype(str).str.strip().eq("") | normalized_df['GroupName'].astype(str).str.strip().str.lower().eq("nan")
+            invalid_chart = normalized_df['ChartName'].isna() | normalized_df['ChartName'].astype(str).str.strip().eq("") | normalized_df['ChartName'].astype(str).str.strip().str.lower().eq("nan")
+            for idx in normalized_df.index[invalid_group]:
+                col_idx = normalized_df.columns.get_loc('GroupName')
+                issues.append(self._build_issue("error", int(idx) + 2, "GroupName", "GroupName cannot be empty.", "Fill in GroupName for this row.", int(idx), col_idx))
+                row_positions.add(int(idx))
+                cell_positions.add((int(idx), col_idx))
+            for idx in normalized_df.index[invalid_chart]:
+                col_idx = normalized_df.columns.get_loc('ChartName')
+                issues.append(self._build_issue("error", int(idx) + 2, "ChartName", "ChartName cannot be empty.", "Fill in ChartName for this row.", int(idx), col_idx))
+                row_positions.add(int(idx))
+                cell_positions.add((int(idx), col_idx))
+            parsed_time, formatted_time = self._format_datetime_series(normalized_df['point_time'])
+            invalid_time = normalized_df['point_time'].notna() & parsed_time.isna()
+            for idx in normalized_df.index[invalid_time]:
+                col_idx = normalized_df.columns.get_loc('point_time')
+                issues.append(self._build_issue("error", int(idx) + 2, "point_time", "point_time cannot be parsed.", "Use a valid datetime like 2025/03/10 00:45.", int(idx), col_idx))
+                row_positions.add(int(idx))
+                cell_positions.add((int(idx), col_idx))
+            normalized_df['point_time'] = formatted_time
+            numeric_vals = pd.to_numeric(normalized_df['point_val'], errors='coerce')
+            invalid_value = normalized_df['point_val'].notna() & numeric_vals.isna()
+            for idx in normalized_df.index[invalid_value]:
+                col_idx = normalized_df.columns.get_loc('point_val')
+                issues.append(self._build_issue("error", int(idx) + 2, "point_val", "point_val must be numeric.", "Replace with a numeric value.", int(idx), col_idx))
+                row_positions.add(int(idx))
+                cell_positions.add((int(idx), col_idx))
+            normalized_df['point_val'] = numeric_vals
+            unique_combinations = normalized_df[['GroupName', 'ChartName']].drop_duplicates()
+            for _, row in unique_combinations.iterrows():
+                groupname = row['GroupName']
+                chartname = row['ChartName']
+                if pd.isna(groupname) or pd.isna(chartname):
+                    continue
+                temp_df = normalized_df[(normalized_df['GroupName'] == groupname) & (normalized_df['ChartName'] == chartname)].copy()
+                other_cols = [col for col in temp_df.columns if col not in ['GroupName', 'ChartName', 'point_time', 'point_val']]
+                final_cols_order = ['GroupName', 'ChartName', 'point_time', 'point_val'] + other_cols
+                temp_df = temp_df[[col for col in final_cols_order if col in temp_df.columns]]
+                export_frames.append((f"{self.sanitize_filename(str(groupname))}_{self.sanitize_filename(str(chartname))}.csv", temp_df))
+        return self.PreviewResult(
+            input_path, encoding, self._current_processing_mode, raw_preview_df, normalized_df.head(self.PREVIEW_ROW_LIMIT).copy(),
+            export_frames, issues, self.SplitPlanSummary(len(export_frames), len(export_frames)), len(normalized_df), len(normalized_df.columns),
+            sum(1 for issue in issues if issue.severity == "error"), sum(1 for issue in issues if issue.severity == "warning"),
+            row_positions, cell_positions, header_positions
+        )
+
+    def _build_type3_preview(self, input_path):
+        df, encoding = self._read_csv_with_encoding_fallback(input_path, header_val=None)
+        raw_preview_df = df.head(self.PREVIEW_ROW_LIMIT + 2).copy()
+        issues = []
+        export_frames = []
+        row_positions = set()
+        cell_positions = set()
+        header_positions = set()
+        normalized_df = pd.DataFrame()
+        summary = self.SplitPlanSummary()
+        if len(df) < 3:
+            issues.append(self._build_issue("error", None, "-", "Type3 file must contain two header rows and at least one data row.", "Ensure the CSV keeps the original two-line header structure."))
+        else:
+            new_columns = []
+            for col_idx, (col1, col2) in enumerate(zip(df.iloc[0], df.iloc[1])):
+                first = "" if pd.isna(col1) else str(col1).strip()
+                second = "" if pd.isna(col2) else str(col2).strip()
+                if second and first:
+                    new_columns.append(f"{first}_{second}")
+                elif second:
+                    new_columns.append(second)
+                elif first:
+                    new_columns.append(first)
+                else:
+                    new_columns.append(f"Unnamed_{col_idx}")
+                    issues.append(self._build_issue("warning", 1, f"Column {col_idx + 1}", "Header is blank; a temporary column name was generated.", "Fill the header if this column is required.", 0, col_idx))
+                    header_positions.add(col_idx)
+                    cell_positions.add((0, col_idx))
+            normalized_df = df.iloc[2:].copy().reset_index(drop=True)
+            normalized_df.columns = new_columns
+            chartname_col_name = next((col for col in normalized_df.columns if 'GroupName' in col and 'ChartName' in col), None)
+            if chartname_col_name is None:
+                issues.append(self._build_issue("error", 2, "Header", "Cannot find the GroupName/ChartName boundary column.", "Keep the Type3 two-row header with GroupName and ChartName markers.", 1, None))
+            else:
+                chartname_idx = normalized_df.columns.get_loc(chartname_col_name)
+                universal_info_columns = normalized_df.columns[:chartname_idx + 1].tolist()
+                chart_columns = normalized_df.columns[(chartname_idx + 1):].tolist()
+                summary.chart_column_count = len(chart_columns)
+                if not chart_columns:
+                    issues.append(self._build_issue("error", 2, "Header", "No chart columns were detected after the GroupName/ChartName boundary.", "Add at least one chart data column.", 1, chartname_idx))
+                else:
+                    if 'point_time' in normalized_df.columns:
+                        parsed_time, formatted_time = self._format_datetime_series(normalized_df['point_time'])
+                        invalid_time = normalized_df['point_time'].notna() & parsed_time.isna()
+                        for idx in normalized_df.index[invalid_time]:
+                            col_idx = normalized_df.columns.get_loc('point_time')
+                            issues.append(self._build_issue("error", int(idx) + 4, "point_time", "point_time cannot be parsed.", "Use a valid datetime like 2025/03/10 00:45.", int(idx) + 2, col_idx))
+                            row_positions.add(int(idx) + 2)
+                            cell_positions.add((int(idx) + 2, col_idx))
+                        normalized_df['point_time'] = formatted_time
+                    for chart_col in chart_columns:
+                        temp_df = normalized_df[universal_info_columns].copy()
+                        numeric_vals = pd.to_numeric(normalized_df[chart_col], errors='coerce')
+                        invalid_value = normalized_df[chart_col].notna() & numeric_vals.isna()
+                        for idx in normalized_df.index[invalid_value]:
+                            col_idx = normalized_df.columns.get_loc(chart_col)
+                            issues.append(self._build_issue("error", int(idx) + 4, chart_col, "Chart value must be numeric.", "Replace with a numeric value.", int(idx) + 2, col_idx))
+                            row_positions.add(int(idx) + 2)
+                            cell_positions.add((int(idx) + 2, col_idx))
+                        temp_df['point_val'] = numeric_vals
+                        if '_' in chart_col:
+                            groupname, chartname = chart_col.split('_', 1)
+                        else:
+                            groupname = ''
+                            chartname = chart_col
+                            issues.append(self._build_issue("warning", 2, chart_col, "Chart column name does not include group and chart separated by underscore.", "Use GroupName_ChartName if possible.", 1, normalized_df.columns.get_loc(chart_col)))
+                            header_positions.add(normalized_df.columns.get_loc(chart_col))
+                        temp_df['GroupName'] = groupname
+                        temp_df['ChartName'] = chartname
+                        final_columns_order = ['GroupName', 'ChartName', 'point_time', 'point_val']
+                        for col in universal_info_columns:
+                            if col not in final_columns_order and col != chartname_col_name:
+                                final_columns_order.append(col)
+                        temp_df = temp_df[[col for col in final_columns_order if col in temp_df.columns]]
+                        export_frames.append((f"{self.sanitize_filename(groupname)}_{self.sanitize_filename(chartname)}.csv", temp_df))
+                    summary.output_file_count = len(export_frames)
+        return self.PreviewResult(
+            input_path, encoding, self._current_processing_mode, raw_preview_df,
+            normalized_df.head(self.PREVIEW_ROW_LIMIT).copy() if not normalized_df.empty else normalized_df,
+            export_frames, issues, summary, max(len(df) - 2, 0), len(df.columns),
+            sum(1 for issue in issues if issue.severity == "error"), sum(1 for issue in issues if issue.severity == "warning"),
+            row_positions, cell_positions, header_positions
+        )
+
+    def _build_preview_for_file(self, input_path):
+        if self._current_processing_mode == "Type2_Vertical":
+            return self._build_type2_preview(input_path)
+        return self._build_type3_preview(input_path)
+
+    def preview_and_validate_files(self):
+        input_paths = [path.strip() for path in self.input_path_entry.text().split(';') if path.strip()]
+        if not input_paths:
+            QtWidgets.QMessageBox.warning(self, tr("warning", "Warning"), tr("please_select_input_file", "Please select at least one input file!"))
+            return
+        self._reset_preview_state()
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(input_paths))
+        self.progress_bar.setValue(0)
+        failed_files = []
+        for idx, input_path in enumerate(input_paths, start=1):
+            try:
+                result = self._build_preview_for_file(input_path)
+                self.preview_results.append(result)
+                self.preview_results_by_path[input_path] = result
+            except Exception as e:
+                failed_files.append(f"{os.path.basename(input_path)}: {e}")
+            self.progress_bar.setValue(idx)
+            self.status_label.setText(
+                tr("previewing_file", "Previewing {file} ({current}/{total})").format(
+                    file=os.path.basename(input_path), current=idx, total=len(input_paths)
+                )
+            )
+            QtWidgets.QApplication.processEvents()
+        self.progress_bar.setVisible(False)
+        self._validated_mode = self._current_processing_mode if self.preview_results else None
+        self.preview_file_combo.blockSignals(True)
+        self.preview_file_combo.clear()
+        for result in self.preview_results:
+            status_text = tr("preview_status_ok", "OK") if result.is_ready else tr("preview_status_error", "Error")
+            self.preview_file_combo.addItem(f"[{status_text}] {os.path.basename(result.file_path)}", result.file_path)
+        self.preview_file_combo.blockSignals(False)
+        if self.preview_results:
+            self.preview_file_combo.setCurrentIndex(0)
+            self._display_preview_result(self.preview_results[0])
+        self._refresh_validation_summary()
+        self._refresh_action_state()
+        if failed_files:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr("warning", "Warning"),
+                tr("preview_failed_message", "Some files could not be previewed:\n{files}").format(files="\n".join(failed_files))
+            )
+        self.status_label.setText(tr("ready_to_process", "Ready to Process") if self.process_button.isEnabled() else tr("cannot_process_until_fixed", "Cannot process until errors are fixed."))
+
+    def _on_preview_file_changed(self, index):
+        if 0 <= index < len(self.preview_results):
+            self._display_preview_result(self.preview_results[index])
+
+    def _display_preview_result(self, result):
+        for key in ["file", "encoding", "mode", "rows", "columns", "outputs", "charts"]:
+            self.summary_labels[key].setObjectName("summaryValue")
+            self.summary_labels[key].style().unpolish(self.summary_labels[key])
+            self.summary_labels[key].style().polish(self.summary_labels[key])
+        self.summary_labels["file"].setText(os.path.basename(result.file_path))
+        self.summary_labels["encoding"].setText(result.encoding)
+        if result.mode == "Type3_Horizontal":
+            mode_text = tr("type3_horizontal", "Type3_Horizontal (Horizontal Layout)")
+        elif result.mode == "Type2_Vertical":
+            mode_text = tr("type2_vertical", "Type2_Vertical (Vertical Layout)")
+        else:
+            mode_text = result.mode
+        self.summary_labels["mode"].setText(mode_text)
+        self.summary_labels["rows"].setText(str(result.data_row_count))
+        self.summary_labels["columns"].setText(str(result.column_count))
+        self.summary_labels["outputs"].setText(str(result.summary.output_file_count))
+        self.summary_labels["charts"].setText(str(result.summary.chart_column_count))
+        ready_label = self.summary_labels["ready"]
+        ready_label.setText(tr("yes", "Yes") if result.is_ready else tr("no", "No"))
+        ready_label.setObjectName("summaryValueOk" if result.is_ready else "summaryValueBlocked")
+        ready_label.style().unpolish(ready_label)
+        ready_label.style().polish(ready_label)
+        ready_label.update()
+        self._populate_preview_table(result)
+        self._populate_validation_table(result)
+
+    def _populate_preview_table(self, result):
+        df = result.raw_preview_df.fillna("").astype(str)
+        self.preview_table.clear()
+        self.preview_table.setRowCount(len(df))
+        self.preview_table.setColumnCount(len(df.columns))
+        self.preview_table.setHorizontalHeaderLabels([str(col) for col in df.columns])
+        for row_idx in range(len(df)):
+            for col_idx in range(len(df.columns)):
+                item = QtWidgets.QTableWidgetItem(df.iat[row_idx, col_idx])
+                if row_idx in result.row_issue_positions:
+                    item.setBackground(QtGui.QColor("#FEF2F2"))
+                if (row_idx, col_idx) in result.cell_issue_positions:
+                    item.setBackground(QtGui.QColor("#FCA5A5"))
+                self.preview_table.setItem(row_idx, col_idx, item)
+        for col_idx in range(len(df.columns)):
+            header_item = QtWidgets.QTableWidgetItem(str(df.columns[col_idx]))
+            if col_idx in result.header_issue_positions:
+                header_item.setBackground(QtGui.QColor("#FDE68A"))
+            self.preview_table.setHorizontalHeaderItem(col_idx, header_item)
+
+    def _populate_validation_table(self, result):
+        self.validation_table.setRowCount(len(result.issues))
+        for row_idx, issue in enumerate(result.issues):
+            values = [
+                "-" if issue.row_number is None else str(issue.row_number),
+                issue.column_name,
+                f"{'Error' if issue.severity == 'error' else 'Warning'}: {issue.message}",
+                issue.suggestion,
+            ]
+            for col_idx, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setBackground(QtGui.QColor("#FEF2F2") if issue.severity == "error" else QtGui.QColor("#FFFBEB"))
+                self.validation_table.setItem(row_idx, col_idx, item)
+
+    def run_processing(self):
+        if not self.preview_results or self._validated_mode != self._current_processing_mode:
+            QtWidgets.QMessageBox.warning(self, tr("warning", "Warning"), tr("reupload_to_preview", "Please re-upload files to generate preview data first."))
+            return
+        if any(not result.is_ready for result in self.preview_results):
+            QtWidgets.QMessageBox.warning(self, tr("warning", "Warning"), tr("cannot_process_until_fixed", "Cannot process until errors are fixed."))
+            return
+        final_output_folder = resource_path('input/raw_charts')
+        try:
+            os.makedirs(final_output_folder, exist_ok=True)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Unable to create 'raw_charts' folder: {final_output_folder}\nError message: {e}")
+            return
+        total_exports = sum(len(result.export_frames) for result in self.preview_results)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(max(total_exports, 1))
+        self.progress_bar.setValue(0)
+        processed_count = 0
+        failed_files = []
+        export_index = 0
+        for result in self.preview_results:
+            try:
+                for filename, export_df in result.export_frames:
+                    export_df.to_csv(os.path.join(final_output_folder, filename), index=False, encoding='utf-8-sig')
+                    export_index += 1
+                    self.progress_bar.setValue(export_index)
+                    self.status_label.setText(
+                        tr("processing_file", "Processing {file} ({current}/{total})").format(
+                            file=filename, current=export_index, total=total_exports
+                        )
+                    )
+                    QtWidgets.QApplication.processEvents()
+                processed_count += 1
+            except Exception as e:
+                failed_files.append(f"{os.path.basename(result.file_path)}: {e}")
+        self.progress_bar.setVisible(False)
+        if processed_count > 0 and not failed_files:
+            QtWidgets.QMessageBox.information(self, tr("complete", "Complete"), tr("all_files_processed", "Successfully processed all {count} files!").format(count=processed_count))
+            self.status_label.setText(tr("all_files_processing_completed", "All files processing completed."))
+        elif processed_count > 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                tr("partial_complete", "Partially Complete"),
+                tr("some_files_failed_message", "Processed {count} files. The following files failed to process:\n{files}").format(
+                    count=processed_count, files="\n".join(failed_files)
+                )
+            )
+            self.status_label.setText(tr("some_files_failed_status", "Some files failed to process, please check the message."))
+        else:
+            QtWidgets.QMessageBox.critical(self, tr("error", "Error"), tr("no_files_processed", "No files were successfully processed."))
+            self.status_label.setText(tr("processing_failed_none", "Processing failed: No files were successfully processed."))
+
 # ============================================================================
 # Modern Progress Bar
 # ============================================================================
@@ -7255,6 +8116,8 @@ class CLTightenWidget(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, "Warning", 
                     f"Raw data directory not found: {self.raw_data_directory}")
                 return
+            if warn_if_no_analysis_selection(self):
+                return
             
             # 取得日期範圍
             start_date = self.start_date_edit.dateTime().toPyDateTime()
@@ -7271,7 +8134,8 @@ class CLTightenWidget(QtWidgets.QWidget):
                 chart_info_path=self.filepath,
                 raw_data_dir=self.raw_data_directory,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                selected_excel_rows=get_selected_analysis_rows(self)
             )
             
             # 顯示並重置進度條

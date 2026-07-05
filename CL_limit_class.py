@@ -139,7 +139,7 @@ def transform_johnson_slifker_shapiro_full(data):
 class CLTightenCalculator:
     """Control Limit Tighten Calculator - 管制線收緊計算器"""
     
-    def __init__(self, chart_info_path=None, raw_data_dir=None, start_date=None, end_date=None):
+    def __init__(self, chart_info_path=None, raw_data_dir=None, start_date=None, end_date=None, selected_excel_rows=None):
         """
         初始化 CL Tighten Calculator
         
@@ -153,6 +153,7 @@ class CLTightenCalculator:
         self.raw_data_dir = raw_data_dir
         self.start_date = start_date
         self.end_date = end_date
+        self.selected_excel_rows = None if selected_excel_rows is None else set(selected_excel_rows)
         self.results = []
         
     # === Utility Functions ===
@@ -2618,6 +2619,12 @@ class CLTightenCalculator:
             raise ValueError("無法載入有效的圖表配置")
 
         self.results = []
+        if self.selected_excel_rows is not None:
+            excel_rows = pd.Series(all_charts_info.index, index=all_charts_info.index).astype(int) + 2
+            all_charts_info = all_charts_info[excel_rows.isin(self.selected_excel_rows)].copy()
+            if all_charts_info.empty:
+                return pd.DataFrame()
+
         total_charts = len(all_charts_info)
         
         print(f"--- 2. 處理 {total_charts} 張圖表的數據 ---")
