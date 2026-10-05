@@ -182,6 +182,12 @@ class SPCCpkDashboard(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         from translations import tr, TranslationManager
+        self.chart_excel_path = getattr(
+            parent, "filepath", os.path.join(get_app_dir(), 'input', 'All_Chart_Information.xlsx')
+        )
+        self.raw_data_dir = getattr(
+            parent, "raw_data_directory", os.path.join(get_app_dir(), 'input', 'raw_charts')
+        )
         self.setWindowTitle(tr('spc_cpk_dashboard'))
         self.resize(1200, 800)
         # 資料結構初始化
@@ -206,6 +212,13 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         
         self.init_ui()
         TranslationManager().register_observer(self)
+
+    def update_paths(self, excel_path, raw_data_dir):
+        self.chart_excel_path = excel_path
+        self.raw_data_dir = raw_data_dir
+        self.all_charts_info = None
+        self.raw_charts_dict = {}
+        self.cpk_results = {}
     
     def refresh_ui_texts(self):
         """刷新UI文字（當語言切換時）"""
@@ -1093,7 +1106,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         print("[DEBUG] recalculate called")
         
         # 1. 設定路徑
-        chart_excel_path = os.path.join(get_app_dir(), 'input', 'All_Chart_Information.xlsx')
+        chart_excel_path = self.chart_excel_path
         
         # 2. 載入 Excel 
         try:
@@ -1130,7 +1143,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         self.chart_date_states = {}
 
         # 5. 載入所有圖表的 raw data 並計算初始 Cpk
-        raw_data_dir = os.path.join(get_app_dir(), 'input', 'raw_charts')
+        raw_data_dir = self.raw_data_dir
         
         for idx, (_, chart_info) in enumerate(self.all_charts_info.iterrows()):
             # --- 新增：更新進度條數值與文字 ---

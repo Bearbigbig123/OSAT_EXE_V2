@@ -563,6 +563,8 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.btn_start.setFixedSize(140, 40)
         self.btn_start.clicked.connect(self.start_check)
         self.btn_start.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
+        self.btn_start.setToolTip(tr("start_health_hint", "檢查 Excel 設定、CSV 檔案與必要欄位"))
         
         # [新增] 開啟來源檔案按鈕
         self.btn_open_source = QtWidgets.QPushButton("📂 AllChartInfo Excel")
@@ -578,6 +580,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.btn_export.clicked.connect(self.export_report)
         self.btn_export.setEnabled(False)
         self.btn_export.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_export.setToolTip(tr("export_disabled_hint", "完成資料健檢後即可匯出報告"))
         
         # [新增] 篩選器 Checkbox
         self.chk_filter_errors = QtWidgets.QCheckBox(tr("only_show_errors"))
@@ -643,6 +646,17 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         layout.addWidget(self.analysis_control_group)
 
         # 5. 詳細表格
+        self.empty_state_label = QtWidgets.QLabel(
+            tr("health_empty_hint", "尚未執行資料健檢。按「開始檢查」後，問題與建議會顯示在下方。")
+        )
+        self.empty_state_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setMinimumHeight(54)
+        self.empty_state_label.setStyleSheet(
+            "background:#FFFFFF; color:#64748B; border:1px dashed #CBD5E1; "
+            "border-radius:8px; padding:12px; font-weight:400;"
+        )
+        layout.addWidget(self.empty_state_label)
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["", "", "", "", "", ""])
@@ -1187,6 +1201,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.btn_start.setEnabled(False)
         self.btn_export.setEnabled(False)
         self.btn_open_source.setEnabled(False) # 開始時禁用
+        self.empty_state_label.hide()
         self.table.setRowCount(0)
         self.all_logs = []
         self.pass_logs = []  # 清空暫存的 Pass 日誌

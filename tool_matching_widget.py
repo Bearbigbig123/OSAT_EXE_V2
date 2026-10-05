@@ -379,8 +379,11 @@ class ToolMatchingWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_app = parent
+        self.info_path = getattr(parent, "filepath", self._get_resource_path('input/All_Chart_Information.xlsx'))
+        self.raw_data_dir = getattr(parent, "raw_data_directory", self._get_resource_path('input/raw_charts/'))
         self.translator = get_translator()
         self.translator.register_observer(self)
+        self.settings_store = QtCore.QSettings("OSAT", "SupplierSPC")
         
         font = QtGui.QFont("Microsoft JhengHei")
         font.setPointSize(10)
@@ -396,9 +399,43 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             'filter_mode': 0,
             'base_date': QtCore.QDate.currentDate()
         }
+        self._load_saved_settings()
         
         self.current_export_data = None
         self.init_ui()
+
+    def update_paths(self, excel_path, raw_data_dir):
+        self.info_path = excel_path
+        self.raw_data_dir = raw_data_dir
+        self.status_label.setText(
+            tr("data_source_updated", "資料來源已更新：{file}").format(file=os.path.basename(excel_path))
+        )
+
+    def _load_saved_settings(self):
+        bool_keys = ["mean_index_enabled", "sigma_index_enabled", "fillnum_enabled"]
+        for key in bool_keys:
+            self.tool_matching_settings[key] = self.settings_store.value(
+                f"tool_matching/{key}", self.tool_matching_settings[key], type=bool
+            )
+        for key in ["mean_index_threshold", "sigma_index_threshold"]:
+            self.tool_matching_settings[key] = self.settings_store.value(
+                f"tool_matching/{key}", self.tool_matching_settings[key], type=float
+            )
+        for key in ["fillnum_value", "filter_mode"]:
+            self.tool_matching_settings[key] = self.settings_store.value(
+                f"tool_matching/{key}", self.tool_matching_settings[key], type=int
+            )
+        saved_date = self.settings_store.value("tool_matching/base_date")
+        if saved_date:
+            parsed = QtCore.QDate.fromString(str(saved_date), QtCore.Qt.DateFormat.ISODate)
+            if parsed.isValid():
+                self.tool_matching_settings["base_date"] = parsed
+
+    def _save_settings(self):
+        for key, value in self.tool_matching_settings.items():
+            if isinstance(value, QtCore.QDate):
+                value = value.toString(QtCore.Qt.DateFormat.ISODate)
+            self.settings_store.setValue(f"tool_matching/{key}", value)
 
     def _get_resource_path(self, relative_path):
         import sys, os
@@ -429,10 +466,10 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             self.status_label.setText(tr("ready"))
         
         self.result_table.setHorizontalHeaderLabels([
-            "View Details", "Abnormal Type", tr("group_name"), tr("chart_name"), tr("matching_group"), 
+            tr("view_details", "View Details"), tr("abnormal_type", "Abnormal Type"), tr("group_name"), tr("chart_name"), tr("matching_group"),
             tr("mean_index"), tr("sigma_index"), tr("k_value"),
             tr("mean"), tr("sigma"), tr("mean_median"), 
-            tr("sigma_median"), tr("sample_size"), "Characteristic"
+            tr("sigma_median"), tr("sample_size"), tr("characteristic", "Characteristic")
         ])
     
     def init_ui(self):
@@ -518,13 +555,22 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         self.main_layout.addWidget(top_layout_widget)
 
         # --- 結果表格 ---
+        result_toolbar = QtWidgets.QHBoxLayout()
+        self.result_search_input = QtWidgets.QLineEdit()
+        self.result_search_input.setPlaceholderText(tr("search_results", "搜尋 Group、Chart 或異常類型"))
+        self.result_search_input.setClearButtonEnabled(True)
+        self.result_search_input.textChanged.connect(self.filter_result_table)
+        result_toolbar.addWidget(self.result_search_input, 1)
+        self.result_count_label = QtWidgets.QLabel(tr("no_results", "尚無結果"))
+        result_toolbar.addWidget(self.result_count_label)
+        self.main_layout.addLayout(result_toolbar)
         self.result_table = QtWidgets.QTableWidget()
         self.result_table.setColumnCount(14) 
         self.result_table.setHorizontalHeaderLabels([
-            "View Details", "Abnormal Type", tr("group_name"), tr("chart_name"), tr("matching_group"), 
+            tr("view_details", "View Details"), tr("abnormal_type", "Abnormal Type"), tr("group_name"), tr("chart_name"), tr("matching_group"),
             tr("mean_index"), tr("sigma_index"), tr("k_value"),
             tr("mean"), tr("sigma"), tr("mean_median"), 
-            tr("sigma_median"), tr("sample_size"), "Characteristic"
+            tr("sigma_median"), tr("sample_size"), tr("characteristic", "Characteristic")
         ])
         self.result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -538,11 +584,30 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         """)
         self.main_layout.addWidget(self.result_table, 1)
 
+    def filter_result_table(self):
+        query = self.result_search_input.text().strip().lower()
+        visible_count = 0
+        for row in range(self.result_table.rowCount()):
+            row_text = " ".join(
+                self.result_table.item(row, column).text()
+                for column in range(self.result_table.columnCount())
+                if self.result_table.item(row, column) is not None
+            ).lower()
+            visible = not query or query in row_text
+            self.result_table.setRowHidden(row, not visible)
+            visible_count += int(visible)
+        self.result_count_label.setText(
+            tr("visible_result_count", "顯示 {visible} / {total} 筆").format(
+                visible=visible_count, total=self.result_table.rowCount()
+            )
+        )
+
     def open_tool_matching_settings(self):
         dialog = ToolMatchingSettingsDialog(self)
         dialog.set_settings(self.tool_matching_settings)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self.tool_matching_settings = dialog.get_settings()
+            self._save_settings()
     
     def open_formula_explanation(self):
         dialog = FormulaExplanationDialog(self)
@@ -569,8 +634,8 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             return abs(mean1 - mean2) / min_sigma
 
     def run_analysis(self):
-        info_path = self._get_resource_path('input/All_Chart_Information.xlsx')
-        raw_dir = self._get_resource_path('input/raw_charts/')
+        info_path = self.info_path
+        raw_dir = self.raw_data_dir
 
         if not os.path.exists(info_path) or not os.path.exists(raw_dir):
             self.status_label.setText("找不到輸入檔案：請確保 input/All_Chart_Information.xlsx 與 input/raw_charts/ 存在。")
@@ -980,7 +1045,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 view_button = QtWidgets.QPushButton()
                 try: view_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
                 except: view_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
-                view_button.setToolTip("View Details")
+                view_button.setToolTip(tr("view_details", "View Details"))
                 view_button.setFixedSize(36, 36)
                 view_button.setIconSize(QtCore.QSize(22, 22))
                 view_button.setStyleSheet("QPushButton { border: none; background: transparent; } QPushButton:hover { background: #e0e7ef; }")
@@ -1011,6 +1076,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
 
             self.result_table.resizeColumnsToContents()
             self.result_table.horizontalHeader().setStretchLastSection(True)
+            self.filter_result_table()
 
             self.current_export_data = all_table_rows
             if all_table_rows:

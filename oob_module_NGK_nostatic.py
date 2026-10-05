@@ -223,17 +223,17 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.show_by_tool_checkbox.setChecked(False)
         tool_layout.addWidget(self.show_by_tool_checkbox)
 
-        self.run_by_tool_median_shift_checkbox = ToggleSwitch(label_text=tr("run_by_tool_median_shift", "Run Tool Median Shift"))
+        self.run_by_tool_median_shift_checkbox = ToggleSwitch(label_text=tr("run_by_tool_median_shift", "Run Tool P05/P50/P95 Shift"))
         self.run_by_tool_median_shift_checkbox.setChecked(False)
         tool_layout.addWidget(self.run_by_tool_median_shift_checkbox)
 
         k_threshold_layout = QHBoxLayout()
         k_threshold_layout.setSpacing(10)
-        self.by_tool_median_shift_k_label = QLabel(tr("by_tool_median_shift_k_threshold", "Tool Median Shift K:"))
+        self.by_tool_median_shift_k_label = QLabel(tr("by_tool_median_shift_k_threshold", "Tool Shift K Threshold:"))
         self.by_tool_median_shift_k_label.setMinimumWidth(150)
         self.by_tool_median_shift_k_combo = QtWidgets.QComboBox()
-        self.by_tool_median_shift_k_combo.addItems(["1.33", "1.5", "1.67", "1.83", "2"])
-        self.by_tool_median_shift_k_combo.setCurrentText("1.67")
+        self.by_tool_median_shift_k_combo.addItems(["2"])
+        self.by_tool_median_shift_k_combo.setCurrentText("2")
         self.by_tool_median_shift_k_combo.setFixedWidth(100)
         self.by_tool_median_shift_k_combo.setEnabled(False)
         self.run_by_tool_median_shift_checkbox.stateChanged.connect(self.by_tool_median_shift_k_combo.setEnabled)
@@ -435,7 +435,7 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         if 'run_by_tool_median_shift' in settings:
             self.run_by_tool_median_shift_checkbox.setChecked(settings['run_by_tool_median_shift'])
         if 'by_tool_median_shift_k_threshold' in settings:
-            k_value = str(settings.get('by_tool_median_shift_k_threshold', 1.67))
+            k_value = str(settings.get('by_tool_median_shift_k_threshold', 2))
             if k_value.endswith('.0'):
                 k_value = k_value[:-2]
             if self.by_tool_median_shift_k_combo.findText(k_value) >= 0:
@@ -470,8 +470,8 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.time_range_group.setTitle(tr("custom_time_range"))
         self.display_gui_checkbox.setText(tr("show_charts_gui"))
         self.show_by_tool_checkbox.setText(tr("show_by_tool_charts"))
-        self.run_by_tool_median_shift_checkbox.setText(tr("run_by_tool_median_shift", "Run Tool Median Shift"))
-        self.by_tool_median_shift_k_label.setText(tr("by_tool_median_shift_k_threshold", "Tool Median Shift K:"))
+        self.run_by_tool_median_shift_checkbox.setText(tr("run_by_tool_median_shift", "Run Tool P05/P50/P95 Shift"))
+        self.by_tool_median_shift_k_label.setText(tr("by_tool_median_shift_k_threshold", "Tool Shift K Threshold:"))
         self.interactive_charts_checkbox.setText(tr("use_interactive_charts"))
         self.use_batch_id_labels_checkbox.setText(tr("use_batch_id_labels"))
         self.custom_time_range_checkbox.setText(tr("enable_custom_time_range"))
@@ -703,7 +703,8 @@ def preprocess_data(chart_info, raw_df):
             return False, None, None
         
         raw_df, chart_info = update_chart_limits(raw_df, chart_info)  # 確保這個函數已經是最佳化的
-        raw_df = exclude_oos_data(raw_df)
+        # Keep OOS observations in OOB analysis. They are counted explicitly in
+        # the selected weekly window instead of being discarded here.
         
         # 保留必要欄位，如果有 Batch_ID 或 ByTool 則保留
         columns_to_keep = ['point_val', 'point_time']
@@ -791,6 +792,20 @@ def make_output_image_path(prefix, group_name, chart_name):
 def save_canvas_figure(canvas, image_path, dpi=100):
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
     canvas.figure.savefig(image_path, dpi=dpi, bbox_inches='tight')
+    return image_path
+
+
+def save_canvas_figure_for_excel(canvas, image_path, figure_size=(10, 4.5), dpi=140):
+    """Save a wider export copy without changing the on-screen canvas size."""
+    os.makedirs(os.path.dirname(image_path), exist_ok=True)
+    figure = canvas.figure
+    original_size = tuple(figure.get_size_inches())
+    try:
+        figure.set_size_inches(*figure_size, forward=False)
+        figure.savefig(image_path, dpi=dpi, bbox_inches='tight')
+    finally:
+        figure.set_size_inches(*original_size, forward=False)
+        canvas.draw_idle()
     return image_path
 
 # 優化後的 get_percentiles 函數
@@ -926,7 +941,8 @@ def record_high_low_calculator(current_week_data, historical_data):
             'record_high_low_display': 'None (High=0, Low=0, Total=0)',
             'highlight_status': 'NO_HIGHLIGHT'
         }
-def review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles):
+def review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles,
+                          k_threshold=1.67):
     # 設定 highlight 的初始值
     highlight_conditions = {key: 'NO_HIGHLIGHT' for key in ['P95_shift', 'P50_shift', 'P05_shift']}
 
@@ -955,8 +971,8 @@ def review_kshift_results(results, resolution, characteristic, data_percentiles,
             # 沒填寫 resolution: 只要有差異就算顯著
             is_significant_diff = not pd.isna(abs_diff)
 
-        # 判斷 K 絕對值是否超過 1.67 (且非NaN)
-        is_significant_k = not pd.isna(k_value) and abs(k_value) > 1.67
+        # 判斷 K 絕對值是否超過呼叫端指定門檻 (整張圖預設 1.67)
+        is_significant_k = not pd.isna(k_value) and abs(k_value) > float(k_threshold)
 
         # 新增判斷 k_value 是否為無限值
         is_infinite_k = not pd.isna(k_value) and np.isinf(abs(k_value))
@@ -1027,7 +1043,8 @@ def safe_division(numerator, denominator, epsilon=1e-9):
     return np.round(numerator, 8) / denominator
 
 
-def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, lcl):
+def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, lcl,
+                                  k_threshold=1.67):
     print = oob_calc_print
     """
     計算 K-shift 和 Sigma 比例相關指標，並判斷高亮狀態。
@@ -1291,7 +1308,10 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
     # --- 判斷當前高亮條件 ---
     try:
         # 確保傳給 review_kshift_results 的 percentiles 字典是完整的
-        current_highlight_conditions = review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles)
+        current_highlight_conditions = review_kshift_results(
+            results, resolution, characteristic, data_percentiles, base_percentiles,
+            k_threshold=k_threshold
+        )
         print(f"  kshift: current_highlight_conditions: {current_highlight_conditions}")
     except Exception as e:
         print(f"  kshift: 判斷當前高亮條件時發生錯誤: {e}")
@@ -1320,7 +1340,11 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
 
             # 判斷滾動結果高亮條件
             # 確保傳給 review_kshift_results 的 percentiles 字典是完整的
-            rolling_highlight_conditions = review_kshift_results(rolling_results, resolution, characteristic, rolled_data['percentiles'], base_percentiles)
+            rolling_highlight_conditions = review_kshift_results(
+                rolling_results, resolution, characteristic,
+                rolled_data['percentiles'], base_percentiles,
+                k_threshold=k_threshold
+            )
             print(f"  kshift: rolling_highlight_conditions: {rolling_highlight_conditions}")
 
         except Exception as e:
@@ -1393,6 +1417,32 @@ def ooc_calculator(data, ucl, lcl):
     ooc_cnt = ((data['point_val'] > ucl) | (data['point_val'] < lcl)).sum()
     ooc_ratio = ooc_cnt / data_cnt if data_cnt != 0 else 0
     return data_cnt, ooc_cnt, ooc_ratio
+
+
+def oos_calculator(data, usl, lsl, characteristic='Nominal'):
+    """Count weekly points outside the applicable specification limit(s)."""
+    values = pd.to_numeric(data['point_val'], errors='coerce').dropna()
+    characteristic = str(characteristic or 'Nominal').strip().lower()
+    usl = pd.to_numeric(pd.Series([usl]), errors='coerce').iloc[0]
+    lsl = pd.to_numeric(pd.Series([lsl]), errors='coerce').iloc[0]
+    valid_usl = pd.notna(usl)
+    valid_lsl = pd.notna(lsl)
+
+    if characteristic == 'bigger':
+        oos_mask = values < lsl if valid_lsl else pd.Series(False, index=values.index)
+    elif characteristic == 'smaller':
+        oos_mask = values > usl if valid_usl else pd.Series(False, index=values.index)
+    else:
+        oos_mask = pd.Series(False, index=values.index)
+        if valid_usl:
+            oos_mask |= values > usl
+        if valid_lsl:
+            oos_mask |= values < lsl
+
+    oos_cnt = int(oos_mask.sum())
+    data_cnt = len(values)
+    oos_ratio = oos_cnt / data_cnt if data_cnt else 0
+    return data_cnt, oos_cnt, oos_ratio
 
 # OOC結果檢查
 def review_ooc_results(ooc_cnt, ooc_ratio, threshold=0.05):
@@ -1951,9 +2001,8 @@ def category_lt_shift_calculator(base_data, weekly_data, threshold=0.7):
 
 def default_by_tool_median_shift_result(reason='N/A'):
     return {
-        'HL_by_tool_median_shift': 'NO_HIGHLIGHT',
+        'HL_by_tool_shift': 'NO_HIGHLIGHT',
         'by_tool_median_shift_display': reason,
-        'by_tool_median_shift_golden_tool': 'N/A',
         'by_tool_median_shift_max_tool': 'N/A',
         'by_tool_median_shift_max_diff': np.nan,
         'by_tool_median_shift_max_k': np.nan,
@@ -1964,22 +2013,51 @@ def default_by_tool_median_shift_result(reason='N/A'):
     }
 
 
+def _build_by_tool_median_shift_cache_key(chart_info, baseline_data, eligible_tools, min_points, fallback_deno):
+    chart_id = str(chart_info.get('ChartID', chart_info.get('chart_ID', 'N/A')))
+    group_name = str(chart_info.get('group_name', chart_info.get('GroupName', 'N/A')))
+    chart_name = str(chart_info.get('chart_name', chart_info.get('ChartName', 'N/A')))
+    fallback_key = None if pd.isna(fallback_deno) else round(float(fallback_deno), 12)
+    row_count = int(len(baseline_data))
+
+    if 'point_time' in baseline_data.columns and not baseline_data.empty:
+        point_times = baseline_data['point_time']
+        if pd.api.types.is_datetime64_any_dtype(point_times):
+            baseline_start = point_times.min()
+            baseline_end = point_times.max()
+        else:
+            baseline_start = None
+            baseline_end = None
+    else:
+        baseline_start = None
+        baseline_end = None
+
+    return (
+        chart_id,
+        group_name,
+        chart_name,
+        baseline_start.isoformat() if pd.notna(baseline_start) else None,
+        baseline_end.isoformat() if pd.notna(baseline_end) else None,
+        row_count,
+        tuple(sorted(str(tool) for tool in eligible_tools)),
+        int(min_points),
+        fallback_key,
+    )
+
+
 def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_info, min_points=3):
     result = default_by_tool_median_shift_result('N/A')
     try:
         if chart_info is None:
             chart_info = {}
-        k_threshold = pd.to_numeric(
-            pd.Series([chart_info.get('by_tool_median_shift_k_threshold', 1.67)]),
-            errors='coerce'
-        ).iloc[0]
-        if pd.isna(k_threshold) or not np.isfinite(k_threshold):
-            k_threshold = 1.67
+        # Tool OOB intentionally uses the same P05/P50/P95 K-shift method as
+        # the whole chart, but its alert threshold is fixed at K > 2.
+        k_threshold = 2.0
         if weekly_data is None or weekly_data.empty:
             return default_by_tool_median_shift_result('No weekly data')
         if baseline_data is None or baseline_data.empty:
             return default_by_tool_median_shift_result('No baseline data')
-        if 'Matching' not in weekly_data.columns:
+        if 'Matching' not in weekly_data.columns or 'Matching' not in baseline_data.columns:
             return default_by_tool_median_shift_result('No Matching column')
 
         weekly = weekly_data.copy()
@@ -1989,105 +2067,148 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
         if weekly.empty:
             return default_by_tool_median_shift_result('No valid weekly values')
 
-        tool_stats = (
+        weekly_stats = (
             weekly.groupby('Matching')['point_val']
-            .agg(median='median', count='count')
+            .agg(weekly_median='median', weekly_count='count')
             .reset_index()
         )
-        eligible = tool_stats[tool_stats['count'] >= min_points].copy()
-        if len(eligible) < 2:
-            return default_by_tool_median_shift_result(f'Insufficient eligible tools (n={len(eligible)})')
+        weekly_stats = weekly_stats[weekly_stats['weekly_count'] >= min_points].copy()
+        if weekly_stats.empty:
+            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
 
-        eligible_tools = set(eligible['Matching'])
-        eligible_values = weekly[weekly['Matching'].isin(eligible_tools)]['point_val']
-        overall_median = float(np.median(eligible_values))
-        eligible['distance_to_overall'] = (eligible['median'] - overall_median).abs()
-        eligible = eligible.sort_values(
-            by=['distance_to_overall', 'count', 'Matching'],
-            ascending=[True, False, True]
-        ).reset_index(drop=True)
+        eligible_tools = set(weekly_stats['Matching'])
 
-        golden_row = eligible.iloc[0]
-        golden_tool = str(golden_row['Matching'])
-        golden_median = float(golden_row['median'])
-
-        compare = eligible[eligible['Matching'] != golden_tool].copy()
-        compare['median_diff'] = (compare['median'] - golden_median).abs()
-
-        baseline_values = pd.to_numeric(baseline_data['point_val'], errors='coerce').dropna().values
-        if len(baseline_values) == 0:
+        baseline = baseline_data.copy()
+        baseline['point_val'] = pd.to_numeric(baseline['point_val'], errors='coerce')
+        baseline['Matching'] = baseline['Matching'].fillna('Unknown').astype(str)
+        baseline = baseline.dropna(subset=['point_val'])
+        if baseline.empty:
             return default_by_tool_median_shift_result('No valid baseline values')
+        baseline = baseline[baseline['Matching'].isin(eligible_tools)].copy()
+        if baseline.empty:
+            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
 
-        base_percentiles = get_percentiles(baseline_values)
-        deno_candidates = []
-        percentile_deno = safe_division(
-            base_percentiles.get('P99.865', np.nan) - base_percentiles.get('P0.135', np.nan),
-            6
+        baseline_summary = (
+            baseline.groupby('Matching')['point_val']
+            .agg(baseline_median='median', baseline_count='count')
+            .reset_index()
         )
-        if pd.notna(percentile_deno) and np.isfinite(percentile_deno) and percentile_deno > 0:
-            deno_candidates.append(float(percentile_deno))
+        baseline_summary = baseline_summary[baseline_summary['baseline_count'] >= min_points].copy()
+        if baseline_summary.empty:
+            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
 
-        ucl = pd.to_numeric(pd.Series([chart_info.get('UCL')]), errors='coerce').iloc[0]
-        lcl = pd.to_numeric(pd.Series([chart_info.get('LCL')]), errors='coerce').iloc[0]
-        if pd.notna(ucl) and pd.notna(lcl):
-            ucl_lcl_deno = safe_division(ucl - lcl, 12)
-            if pd.notna(ucl_lcl_deno) and np.isfinite(ucl_lcl_deno) and ucl_lcl_deno > 0:
-                deno_candidates.append(float(ucl_lcl_deno))
+        eligible_matching = set(baseline_summary['Matching'])
+        weekly_stats = weekly_stats[weekly_stats['Matching'].isin(eligible_matching)].copy()
+        if weekly_stats.empty:
+            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
 
-        if not deno_candidates:
-            return default_by_tool_median_shift_result('No valid P50 denominator')
-
-        p50_deno = max(deno_candidates)
-        compare['tool_median_k'] = compare['median_diff'] / p50_deno
-        compare = compare.sort_values(
-            by=['median_diff', 'count', 'Matching'],
-            ascending=[False, False, True]
-        ).reset_index(drop=True)
-
-        max_row = compare.iloc[0]
-        max_tool = str(max_row['Matching'])
-        max_diff = float(max_row['median_diff'])
-        max_k = float(max_row['tool_median_k'])
-
-        resolution = pd.to_numeric(pd.Series([chart_info.get('Resolution')]), errors='coerce').iloc[0]
-        has_valid_resolution = pd.notna(resolution) and resolution > 0
-        resolution_ok = True if not has_valid_resolution else max_diff >= float(resolution)
-        k_ok = pd.notna(max_k) and np.isfinite(max_k) and max_k > float(k_threshold)
-        highlight = 'HIGHLIGHT' if k_ok and resolution_ok else 'NO_HIGHLIGHT'
-
+        grouped_weekly = weekly.groupby('Matching')['point_val']
+        grouped_baseline = baseline.groupby('Matching')['point_val']
         tool_records = []
-        for _, row in compare.iterrows():
-            diff = float(row['median_diff'])
-            k_value = float(row['tool_median_k'])
-            tool_resolution_ok = True if not has_valid_resolution else diff >= float(resolution)
-            tool_highlight = bool(pd.notna(k_value) and np.isfinite(k_value) and k_value > float(k_threshold) and tool_resolution_ok)
+        percentile_order = ('P95', 'P50', 'P05')
+
+        for tool_name in sorted(eligible_matching):
+            weekly_values = grouped_weekly.get_group(tool_name).to_numpy()
+            baseline_values = grouped_baseline.get_group(tool_name).to_numpy()
+            weekly_percentiles = get_percentiles(weekly_values)
+            baseline_percentiles = get_percentiles(baseline_values)
+
+            base_stats = {
+                'values': baseline_values,
+                'cnt': len(baseline_values),
+                'mean': float(np.mean(baseline_values)),
+                'sigma': float(np.std(baseline_values, ddof=1)) if len(baseline_values) > 1 else 0.0,
+            }
+            weekly_tool_stats = {
+                'values': weekly_values,
+                'cnt': len(weekly_values),
+                'mean': float(np.mean(weekly_values)),
+                'sigma': float(np.std(weekly_values, ddof=1)) if len(weekly_values) > 1 else 0.0,
+            }
+            shift_result = kshift_sigma_ratio_calculator(
+                base_stats,
+                weekly_tool_stats,
+                chart_info.get('Characteristics'),
+                chart_info.get('Resolution'),
+                chart_info.get('UCL'),
+                chart_info.get('LCL'),
+                k_threshold=k_threshold,
+            )
+
+            k_values = {}
+            diffs = {}
+            triggered_rules = []
+            for percentile in percentile_order:
+                k_value = pd.to_numeric(
+                    pd.Series([shift_result.get(f'{percentile}_k', np.nan)]),
+                    errors='coerce'
+                ).iloc[0]
+                k_values[percentile] = float(k_value) if pd.notna(k_value) and np.isfinite(k_value) else np.nan
+                diffs[percentile] = abs(
+                    float(weekly_percentiles[percentile]) - float(baseline_percentiles[percentile])
+                )
+                if shift_result.get(f'{percentile}_shift') == 'HIGHLIGHT':
+                    triggered_rules.append(f'{percentile}_shift')
+
+            valid_k = [(p, k_values[p]) for p in percentile_order if pd.notna(k_values[p])]
+            if not valid_k:
+                continue
+            peak_percentile, peak_k = max(valid_k, key=lambda item: item[1])
+            peak_diff = diffs[peak_percentile]
+            tool_highlight = bool(triggered_rules)
+
             tool_records.append({
-                'tool': str(row['Matching']),
-                'median': round(float(row['median']), 8),
-                'count': int(row['count']),
-                'diff': round(diff, 8),
-                'k': round(k_value, 4),
+                'tool': str(tool_name),
+                'weekly_median': round(float(weekly_percentiles['P50']), 8),
+                'baseline_median': round(float(baseline_percentiles['P50']), 8),
+                'weekly_count': int(len(weekly_values)),
+                'baseline_count': int(len(baseline_values)),
+                # Backward-compatible summary fields used by the current UI.
+                'diff': round(float(peak_diff), 8),
+                'k': round(float(peak_k), 4),
+                'max_percentile': peak_percentile,
                 'highlight': tool_highlight,
+                'triggered_rules': triggered_rules,
+                # Full per-tool result from the whole-chart shift algorithm.
+                'p95_diff': round(float(diffs['P95']), 8),
+                'p50_diff': round(float(diffs['P50']), 8),
+                'p05_diff': round(float(diffs['P05']), 8),
+                'p95_k': round(float(k_values['P95']), 4) if pd.notna(k_values['P95']) else None,
+                'p50_k': round(float(k_values['P50']), 4) if pd.notna(k_values['P50']) else None,
+                'p05_k': round(float(k_values['P05']), 4) if pd.notna(k_values['P05']) else None,
+                'p95_shift': shift_result.get('P95_shift', 'NO_HIGHLIGHT'),
+                'p50_shift': shift_result.get('P50_shift', 'NO_HIGHLIGHT'),
+                'p05_shift': shift_result.get('P05_shift', 'NO_HIGHLIGHT'),
             })
 
+        if not tool_records:
+            return default_by_tool_median_shift_result('No valid K-shift denominator')
+
+        tool_records.sort(
+            key=lambda item: (-item['k'], -item['weekly_count'], -item['baseline_count'], item['tool'])
+        )
+        max_record = tool_records[0]
+        max_tool = max_record['tool']
+        max_diff = float(max_record['diff'])
+        max_k = float(max_record['k'])
+
         shifted_records = [item for item in tool_records if item['highlight']]
-        top_records = shifted_records[:3]
         top_tools = ', '.join(
-            f"{item['tool']}(K={item['k']:.2f}, Diff={item['diff']:.6g})"
-            for item in top_records
-        ) if top_records else 'N/A'
+            f"{item['tool']}({'+'.join(item['triggered_rules'])}, K={item['k']:.2f}, Diff={item['diff']:.6g})"
+            for item in shifted_records
+        ) if shifted_records else 'N/A'
         all_tools_json = json.dumps(tool_records, ensure_ascii=False)
 
-        display_top = '/'.join(item['tool'] for item in top_records) if top_records else 'N/A'
-        display = f"Golden={golden_tool}, Top={display_top}, MaxK={max_k:.2f}, Shifted={len(shifted_records)}"
+        display_top = '/'.join(item['tool'] for item in shifted_records) if shifted_records else 'N/A'
+        display = f"Top={display_top}, Shifted={len(shifted_records)}"
+        highlight = 'HIGHLIGHT' if shifted_records else 'NO_HIGHLIGHT'
         result.update({
-            'HL_by_tool_median_shift': highlight,
+            'HL_by_tool_shift': highlight,
             'by_tool_median_shift_display': display,
-            'by_tool_median_shift_golden_tool': golden_tool,
             'by_tool_median_shift_max_tool': max_tool,
             'by_tool_median_shift_max_diff': max_diff,
             'by_tool_median_shift_max_k': max_k,
-            'by_tool_median_shift_tool_count': int(len(eligible)),
+            'by_tool_median_shift_tool_count': int(len(tool_records)),
             'by_tool_median_shift_top_tools': top_tools,
             'by_tool_median_shift_top_count': int(len(shifted_records)),
             'by_tool_median_shift_all_tools_json': all_tools_json,
@@ -2217,6 +2338,10 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
         print("  正在呼叫 ooc_calculator...")
         # ooc_calculator 使用週數據計算 OOC 點數
         ooc_results = ooc_calculator(weekly_data, chart_info.get('UCL'), chart_info.get('LCL')) # 使用 .get 防止 key 錯誤
+        oos_results = oos_calculator(
+            weekly_data, chart_info.get('USL'), chart_info.get('LSL'),
+            chart_info.get('Characteristics', 'Nominal')
+        )
         print(f"  ooc_calculator 返回: {ooc_results}")
 
         print("  正在呼叫 review_ooc_results...")
@@ -2271,7 +2396,10 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
              trending_results == 'HIGHLIGHT' or
              ooc_highlight == 'HIGHLIGHT' or # 應該也要考慮 ooc_highlight
              three_o7d_highlight == 'HIGHLIGHT' or
-             by_tool_median_results.get('HL_by_tool_median_shift') == 'HIGHLIGHT' or
+             by_tool_median_results.get(
+                 'HL_by_tool_shift',
+                 by_tool_median_results.get('HL_by_tool_median_shift')
+             ) == 'HIGHLIGHT' or
              record_results.get('highlight_status') == 'HIGHLIGHT' # 新增 record high/low 判斷
         ) else 'NO_HIGHLIGHT'
         print(f"  計算出的 highlight_status: {highlight_status}")
@@ -2282,6 +2410,7 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
         result = {
             'data_cnt': ooc_results[0], # 週數據點數
             'ooc_cnt': ooc_results[1], # 週數據 OOC 點數
+            'oos_cnt': oos_results[1], # 週數據 OOS 點數
             'WE_Rule': '', # 這個欄位在 GUI 類的 build_result 中填充
             'OOB_Rule': '' if not baseline_empty else 'N/A - No Baseline', # 基線為空時標記
             'HL_P95_shift': kshift_results.get('P95_shift', 'N/A'), # 使用 get 並提供預設值，避免 key 錯誤
@@ -2290,8 +2419,12 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
             'HL_sticking_shift': sticking_rate_results.get('highlight_status', 'N/A'),
             'HL_trending': trending_results, # trending_results 本身就是 HIGHLIGHT/NO_HIGHLIGHT
             'HL_high_OOC': ooc_highlight, # ooc_highlight 本身就是 HIGHLIGHT/NO_HIGHLIGHT
+            'HL_OOS': 'HIGHLIGHT' if oos_results[1] > 0 else 'NO_HIGHLIGHT',
             'HL_3O7D': three_o7d_highlight,
-            'HL_by_tool_median_shift': by_tool_median_results.get('HL_by_tool_median_shift', 'NO_HIGHLIGHT'),
+            'HL_by_tool_shift': by_tool_median_results.get(
+                'HL_by_tool_shift',
+                by_tool_median_results.get('HL_by_tool_median_shift', 'NO_HIGHLIGHT')
+            ),
             'HL_record_high_low': record_results.get('highlight_status', 'N/A'), # 新增 record high/low 欄位
             'record_high': record_results.get('record_high', False), # 是否創新高
             'record_low': record_results.get('record_low', False), # 是否創新低
@@ -2302,7 +2435,6 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
             'record_high_low_risk': record_results.get('record_high_low_risk', 'NONE'),
             'record_high_low_display': record_results.get('record_high_low_display', 'None (High=0, Low=0, Total=0)'),
             'by_tool_median_shift_display': by_tool_median_results.get('by_tool_median_shift_display', 'N/A'),
-            'by_tool_median_shift_golden_tool': by_tool_median_results.get('by_tool_median_shift_golden_tool', 'N/A'),
             'by_tool_median_shift_max_tool': by_tool_median_results.get('by_tool_median_shift_max_tool', 'N/A'),
             'by_tool_median_shift_max_diff': by_tool_median_results.get('by_tool_median_shift_max_diff', np.nan),
             'by_tool_median_shift_max_k': by_tool_median_results.get('by_tool_median_shift_max_k', np.nan),
@@ -2873,11 +3005,11 @@ def plot_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end
                     val = raw_df.loc[idx, 'point_val']
                     record_types = []
                     
-                    if record_results.get('record_high', False) and not record_high_marked and val > historical_max:
+                    if record_results.get('record_high', False) and val > historical_max:
                         record_types.append('Record High')
                         record_high_marked = True  # 標記已找到第一個創新高的點
                     
-                    if record_results.get('record_low', False) and not record_low_marked and val < historical_min:
+                    if record_results.get('record_low', False) and val < historical_min:
                         record_types.append('Record Low')
                         record_low_marked = True  # 標記已找到第一個創新低的點
                     
@@ -2908,13 +3040,19 @@ def plot_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end
 
     # === X 軸 ===
     interval = max(1, len(raw_df) // 30)
+    record_high_legend_added = False
+    record_low_legend_added = False
     for idx, record_types in record_high_low_info.items():
         if 'Record High' in record_types:
             ax.plot(idx, raw_df['point_val'].iloc[idx], marker='^', color='#FF1493',
-                    markersize=8, linestyle='None', zorder=6, label='Record High')
+                    markersize=8, linestyle='None', zorder=6,
+                    label='Record High' if not record_high_legend_added else '_nolegend_')
+            record_high_legend_added = True
         if 'Record Low' in record_types:
             ax.plot(idx, raw_df['point_val'].iloc[idx], marker='v', color='#8B1E6D',
-                    markersize=8, linestyle='None', zorder=6, label='Record Low')
+                    markersize=8, linestyle='None', zorder=6,
+                    label='Record Low' if not record_low_legend_added else '_nolegend_')
+            record_low_legend_added = True
 
     ax.set_xticks(x_values[::interval])
     
@@ -3008,13 +3146,19 @@ def plot_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end
 
     
 
-def plot_spc_by_tool_color(raw_df, chart_info, weekly_start_date, weekly_end_date, oob_info="N/A"):
+def plot_spc_by_tool_color(
+    raw_df,
+    chart_info,
+    weekly_start_date,
+    weekly_end_date,
+    oob_info="N/A",
+    figure_size=(13, 2.5)
+):
     import pandas as pd
     import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
-    # 強制對齊畫布尺寸 (13, 2.5)
-    fig = Figure(figsize=(13, 2.5))
+    fig = Figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     
     # 統一刻度字體大小
@@ -3080,13 +3224,19 @@ def plot_spc_by_tool_color(raw_df, chart_info, weekly_start_date, weekly_end_dat
     return canvas
 
 
-def plot_spc_by_tool_group(raw_df, chart_info, weekly_start_date=None, weekly_end_date=None, oob_info="N/A"):
+def plot_spc_by_tool_group(
+    raw_df,
+    chart_info,
+    weekly_start_date=None,
+    weekly_end_date=None,
+    oob_info="N/A",
+    figure_size=(13, 2.5)
+):
     import pandas as pd
     import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
-    # 強制對齊畫布尺寸 (13, 2.5)
-    fig = Figure(figsize=(13, 2.5))
+    fig = Figure(figsize=figure_size)
     ax = fig.add_subplot(111)
     
     # 統一刻度字體大小
@@ -3106,18 +3256,75 @@ def plot_spc_by_tool_group(raw_df, chart_info, weekly_start_date=None, weekly_en
         ooc_indices=display_ooc_indices
     )
 
+    tool_shift_info = {}
+    all_tools_json = chart_info.get('by_tool_median_shift_all_tools_json', '[]')
+    try:
+        parsed_tool_info = json.loads(all_tools_json) if all_tools_json else []
+        for item in parsed_tool_info:
+            tool_name = str(item.get('tool', ''))
+            if tool_name:
+                tool_shift_info[tool_name] = item
+    except Exception:
+        tool_shift_info = {}
+
     unique_tools = sorted(df['Matching'].unique())
     colors = list(mcolors.TABLEAU_COLORS.values())
     tool_color_map = {tool: colors[i % len(colors)] for i, tool in enumerate(unique_tools)}
+    weekly_start = pd.to_datetime(weekly_start_date) if weekly_start_date is not None else None
+    weekly_end = pd.to_datetime(weekly_end_date) if weekly_end_date is not None else None
+    has_period_separator = False
 
     artists = []
     for i, tool in enumerate(unique_tools):
         subset = df[df['Matching'] == tool]
+        tool_info = tool_shift_info.get(str(tool), {})
+        tool_k = pd.to_numeric(pd.Series([tool_info.get('k')]), errors='coerce').iloc[0]
+        max_percentile = str(tool_info.get('max_percentile', '')).upper()
+        triggered_rules = [
+            str(rule).replace('_shift', '').upper()
+            for rule in tool_info.get('triggered_rules', [])
+            if rule
+        ]
+        percentile_rank = {'P05': 0, 'P50': 1, 'P95': 2}
+        triggered_rules.sort(key=lambda name: percentile_rank.get(name, 99))
+        if pd.notna(tool_k) and np.isfinite(tool_k):
+            if len(triggered_rules) == 1:
+                triggered_percentile = triggered_rules[0]
+                triggered_k = pd.to_numeric(
+                    pd.Series([tool_info.get(f'{triggered_percentile.lower()}_k')]),
+                    errors='coerce'
+                ).iloc[0]
+                display_k = triggered_k if pd.notna(triggered_k) and np.isfinite(triggered_k) else tool_k
+                tool_label = f"{tool} ({triggered_percentile} K={display_k:.2f})"
+            elif len(triggered_rules) > 1:
+                tool_label = f"{tool} ({'/'.join(triggered_rules)}, Max K={tool_k:.2f})"
+            elif max_percentile:
+                tool_label = f"{tool} (Max {max_percentile} K={tool_k:.2f})"
+            else:
+                tool_label = f"{tool} (Max K={tool_k:.2f})"
+        else:
+            tool_label = str(tool)
         ln, = ax.plot(subset.index, subset['point_val'], marker='o', markersize=4,
-                      color=tool_color_map[tool], label=tool, alpha=0.8, zorder=3)
+                      color=tool_color_map[tool], label=tool_label, alpha=0.8, zorder=3)
         artists.append(ln)
         if i > 0:
             ax.axvline(x=subset.index.min() - 0.5, color='gray', linestyle=':', alpha=0.4, zorder=1)
+        if weekly_start is not None:
+            weekly_mask = subset['point_time'] >= weekly_start
+            if weekly_end is not None:
+                weekly_mask &= subset['point_time'] <= weekly_end
+            has_baseline = (subset['point_time'] < weekly_start).any()
+            if has_baseline and weekly_mask.any():
+                boundary_x = subset.index[weekly_mask].min() - 0.5
+                ax.axvline(
+                    x=boundary_x,
+                    color='#344CB7',
+                    linestyle='--',
+                    linewidth=1.4,
+                    alpha=0.85,
+                    zorder=2,
+                )
+                has_period_separator = True
     if len(display_ooc_indices) > 0:
         ax.plot(display_ooc_indices, df['point_val'].iloc[display_ooc_indices], 'ro', markersize=5, linestyle='None', zorder=4)
 
@@ -3131,7 +3338,11 @@ def plot_spc_by_tool_group(raw_df, chart_info, weekly_start_date=None, weekly_en
     unified_title = get_unified_title(chart_info)
     ax.set_title(f"{unified_title}\nMachine Grouping Analysis", loc='left', fontsize=PLOT_STYLE['title'])
     
-    configure_external_right_legend(fig, ax, len(unique_tools), PLOT_STYLE['legend'])
+    if has_period_separator:
+        ax.plot([], [], color='#344CB7', linestyle='--', linewidth=1.4, label='BSL / Weekly')
+    configure_external_right_legend(
+        fig, ax, len(unique_tools) + int(has_period_separator), PLOT_STYLE['legend']
+    )
     ax.hlines([chart_info['UCL'], chart_info['Target'], chart_info['LCL']], 
               -0.5, len(df), colors=['#E83F6F', '#087E8B', '#E83F6F'], linestyles='--', alpha=0.5)
     add_right_cl_labels(ax, chart_info, x_pos=1.04, ha='right')
@@ -3206,6 +3417,22 @@ def plot_weekly_spc_chart(raw_df, chart_info, weekly_start_date, weekly_end_date
     display_ooc_indices = np.flatnonzero(display_ooc_mask)
     if len(display_ooc_indices) > 0:
         plt.plot(display_ooc_indices, df_weekly['point_val'].iloc[display_ooc_indices], 'ro', markersize=6, linestyle='None')
+
+    # Mark every weekly point beyond the historical range. Up/down triangles keep
+    # record events visible even when the same point is also OOC or a WE violation.
+    historical_values = df.loc[df['point_time'] < ws, 'point_val'].dropna()
+    if not historical_values.empty:
+        weekly_values = df_weekly['point_val'].to_numpy()
+        record_high_positions = np.flatnonzero(weekly_values > historical_values.max())
+        record_low_positions = np.flatnonzero(weekly_values < historical_values.min())
+        if len(record_high_positions) > 0:
+            plt.plot(record_high_positions, weekly_values[record_high_positions], marker='^',
+                     color='#FF1493', markersize=9, linestyle='None', zorder=7,
+                     label='Record High')
+        if len(record_low_positions) > 0:
+            plt.plot(record_low_positions, weekly_values[record_low_positions], marker='v',
+                     color='#8B1E6D', markersize=9, linestyle='None', zorder=7,
+                     label='Record Low')
 
     # 檢查每一個 weekly 點：用 global index (df_weekly.index) 去取 global 的前 idx+1 筆資料來檢查 rules
     violated_points = []  # 收集觸發的點 (pos_in_weekly, global_index, time, value, rules)
@@ -3357,11 +3584,11 @@ def plot_weekly_spc_chart_interactive(raw_df, chart_info, weekly_start_date, wee
                 val = row['point_val']
                 record_types = []
                 
-                if record_results.get('record_high', False) and not record_high_marked and val > historical_max:
+                if record_results.get('record_high', False) and val > historical_max:
                     record_types.append('Record High')
                     record_high_marked = True  # 標記已找到第一個創新高的點
                 
-                if record_results.get('record_low', False) and not record_low_marked and val < historical_min:
+                if record_results.get('record_low', False) and val < historical_min:
                     record_types.append('Record Low')
                     record_low_marked = True  # 標記已找到第一個創新低的點
                 
@@ -3374,14 +3601,20 @@ def plot_weekly_spc_chart_interactive(raw_df, chart_info, weekly_start_date, wee
                     # if 'Record Low' in record_types:
                     #     ax.plot(pos_in_weekly, val, marker='v', color='#FF1493', markersize=6, zorder=5)
 
+    record_high_legend_added = False
+    record_low_legend_added = False
     for pos_in_weekly, record_types in record_high_low_info_weekly.items():
         val = df_weekly.iloc[pos_in_weekly]['point_val']
         if 'Record High' in record_types:
             ax.plot(pos_in_weekly, val, marker='^', color='#FF1493',
-                    markersize=8, linestyle='None', zorder=6, label='Record High')
+                    markersize=8, linestyle='None', zorder=6,
+                    label='Record High' if not record_high_legend_added else '_nolegend_')
+            record_high_legend_added = True
         if 'Record Low' in record_types:
             ax.plot(pos_in_weekly, val, marker='v', color='#8B1E6D',
-                    markersize=8, linestyle='None', zorder=6, label='Record Low')
+                    markersize=8, linestyle='None', zorder=6,
+                    label='Record Low' if not record_low_legend_added else '_nolegend_')
+            record_low_legend_added = True
 
     # X axis labels
     interval = max(1, points_num // 30)
@@ -3437,14 +3670,26 @@ def plot_weekly_spc_chart_interactive(raw_df, chart_info, weekly_start_date, wee
     return canvas
 
 
-def save_results_to_excel(results_df, scale_factor=0.3):
+def save_results_to_excel(
+    results_df,
+    output_path='result_with_images.xlsx',
+    left_image_width=500,
+    right_image_width=650,
+    target_image_height=240
+):
     results_df['group_name'] = results_df['group_name'].replace("Default", "")  # 替換 Default 為空白
 
-    workbook = xlsxwriter.Workbook('result_with_images.xlsx')
+    workbook = xlsxwriter.Workbook(output_path)
     worksheet = workbook.add_worksheet()
+    worksheet.freeze_panes(1, 0)
+    worksheet.set_zoom(85)
 
     cell_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10})
-    header_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 12, 'bold': True})
+    header_format = workbook.add_format({
+        'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial',
+        'font_size': 12, 'bold': True, 'bg_color': '#E8EEFF',
+        'font_color': '#000957', 'border': 1
+    })
     risk_medium_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#f59e0b', 'bold': True})
     risk_low_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#10b981', 'bold': True})
     risk_none_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'font_name': 'Arial', 'font_size': 10, 'font_color': '#64748B'})
@@ -3453,13 +3698,27 @@ def save_results_to_excel(results_df, scale_factor=0.3):
 
     image_cols = ['chart_path', 'weekly_chart_path', 'by_tool_color_path', 'by_tool_group_path']
     data_columns = [col for col in results_df.columns if col not in image_cols]
+    image_headers = [
+        'Total SPC',
+        'Weekly SPC',
+        'By Tool Comparison',
+        'Matching Group Analysis',
+    ]
+    for col_idx, header in enumerate(image_headers):
+        worksheet.write(0, col_idx, header, header_format)
+    worksheet.set_row(0, 26)
 
     for col_idx, header in enumerate(data_columns):
         worksheet.write(0, col_idx + 4, header, header_format)
         col_widths[col_idx + 4] = max(len(header), col_widths.get(col_idx + 4, 0))
 
-    max_image_height = 0
-    image_column_width = 0
+    target_widths = [
+        left_image_width,
+        left_image_width,
+        right_image_width,
+        right_image_width,
+    ]
+    max_display_widths = [0, 0, 0, 0]
 
     for row_idx, row in enumerate(results_df.itertuples(index=False), start=1):
         img_path = row.chart_path
@@ -3467,65 +3726,32 @@ def save_results_to_excel(results_df, scale_factor=0.3):
         by_tool_color_path = getattr(row, 'by_tool_color_path', 'N/A')
         by_tool_group_path = getattr(row, 'by_tool_group_path', 'N/A')
 
-        x_offset = 0
-        y_offset = 10
+        def load_image_metrics(path):
+            if not path or not os.path.exists(str(path)):
+                return 0, 0, 96.0, 96.0
+            with Image.open(path) as image:
+                width, height = image.size
+                dpi = image.info.get('dpi', (96.0, 96.0))
+                if not isinstance(dpi, (tuple, list)) or len(dpi) < 2:
+                    dpi = (96.0, 96.0)
+                dpi_x = float(dpi[0]) if dpi[0] else 96.0
+                dpi_y = float(dpi[1]) if dpi[1] else 96.0
+                return width, height, dpi_x, dpi_y
 
-        total_w = total_h = 0
-        weekly_w = weekly_h = 0
-        color_w = color_h = 0
-        group_w = group_h = 0
+        total_w, total_h, total_dpi_x, total_dpi_y = load_image_metrics(img_path)
+        weekly_w, weekly_h, weekly_dpi_x, weekly_dpi_y = load_image_metrics(weekly_spc_chart_path)
+        color_w, color_h, color_dpi_x, color_dpi_y = load_image_metrics(by_tool_color_path)
+        group_w, group_h, group_dpi_x, group_dpi_y = load_image_metrics(by_tool_group_path)
 
-        if img_path and os.path.exists(str(img_path)):
-            total_w, total_h = Image.open(img_path).size
-        if weekly_spc_chart_path and os.path.exists(str(weekly_spc_chart_path)):
-            weekly_w, weekly_h = Image.open(weekly_spc_chart_path).size
-        if by_tool_color_path and os.path.exists(str(by_tool_color_path)):
-            color_w, color_h = Image.open(by_tool_color_path).size
-        if by_tool_group_path and os.path.exists(str(by_tool_group_path)):
-            group_w, group_h = Image.open(by_tool_group_path).size
+        def fit_image_scale(width, height, target_width):
+            if width <= 0 or height <= 0:
+                return 1.0
+            return min(target_width / width, target_image_height / height)
 
-        total_scale = scale_factor
-        weekly_scale = scale_factor
-        color_scale = scale_factor
-        group_scale = scale_factor
-
-        options_total = {
-            'x_scale': total_scale,
-            'y_scale': total_scale,
-            'x_offset': x_offset,
-            'y_offset': y_offset,
-            'object_position': 1
-        }
-        options_weekly = {
-            'x_scale': weekly_scale,
-            'y_scale': weekly_scale,
-            'x_offset': x_offset,
-            'y_offset': y_offset,
-            'object_position': 1
-        }
-        options_color = {
-            'x_scale': color_scale,
-            'y_scale': color_scale,
-            'x_offset': x_offset,
-            'y_offset': y_offset,
-            'object_position': 1
-        }
-        options_group = {
-            'x_scale': group_scale,
-            'y_scale': group_scale,
-            'x_offset': x_offset,
-            'y_offset': y_offset,
-            'object_position': 1
-        }
-
-        if img_path and os.path.exists(str(img_path)):
-            worksheet.insert_image(row_idx, 0, img_path, options_total)
-        if weekly_spc_chart_path and os.path.exists(str(weekly_spc_chart_path)):
-            worksheet.insert_image(row_idx, 1, weekly_spc_chart_path, options_weekly)
-        if by_tool_color_path and os.path.exists(str(by_tool_color_path)):
-            worksheet.insert_image(row_idx, 2, by_tool_color_path, options_color)
-        if by_tool_group_path and os.path.exists(str(by_tool_group_path)):
-            worksheet.insert_image(row_idx, 3, by_tool_group_path, options_group)
+        total_scale = fit_image_scale(total_w, total_h, target_widths[0])
+        weekly_scale = fit_image_scale(weekly_w, weekly_h, target_widths[1])
+        color_scale = fit_image_scale(color_w, color_h, target_widths[2])
+        group_scale = fit_image_scale(group_w, group_h, target_widths[3])
 
         scaled_widths = [
             total_w * total_scale,
@@ -3539,14 +3765,48 @@ def save_results_to_excel(results_df, scale_factor=0.3):
             color_h * color_scale,
             group_h * group_scale
         ]
+        dpi_x_values = [total_dpi_x, weekly_dpi_x, color_dpi_x, group_dpi_x]
+        dpi_y_values = [total_dpi_y, weekly_dpi_y, color_dpi_y, group_dpi_y]
+        displayed_widths = [
+            width * (96.0 / dpi)
+            for width, dpi in zip(scaled_widths, dpi_x_values)
+        ]
+        displayed_heights = [
+            height * (96.0 / dpi)
+            for height, dpi in zip(scaled_heights, dpi_y_values)
+        ]
+        for image_index, displayed_width in enumerate(displayed_widths):
+            max_display_widths[image_index] = max(
+                max_display_widths[image_index], displayed_width
+            )
+        row_max_height = max([h for h in displayed_heights if h > 0] or [0])
+        row_box_height = row_max_height + 12
 
-        row_max_height = max([h for h in scaled_heights if h > 0] or [0])
-        row_max_width = max([w for w in scaled_widths if w > 0] or [0])
+        def image_options(scale, displayed_height):
+            return {
+                'x_scale': scale,
+                'y_scale': scale,
+                'x_offset': 6,
+                'y_offset': max(6, int((row_box_height - displayed_height) / 2)),
+                'object_position': 1
+            }
 
-        if row_max_height > max_image_height:
-            max_image_height = row_max_height
-        if row_max_width > image_column_width:
-            image_column_width = row_max_width
+        options_total = image_options(total_scale, displayed_heights[0])
+        options_weekly = image_options(weekly_scale, displayed_heights[1])
+        options_color = image_options(color_scale, displayed_heights[2])
+        options_group = image_options(group_scale, displayed_heights[3])
+
+        # XlsxWriter row height uses points, while image dimensions use pixels.
+        worksheet.set_row(row_idx, max(60, row_box_height * 0.75))
+
+        if img_path and os.path.exists(str(img_path)):
+            worksheet.insert_image(row_idx, 0, img_path, options_total)
+        if weekly_spc_chart_path and os.path.exists(str(weekly_spc_chart_path)):
+            worksheet.insert_image(row_idx, 1, weekly_spc_chart_path, options_weekly)
+        if by_tool_color_path and os.path.exists(str(by_tool_color_path)):
+            worksheet.insert_image(row_idx, 2, by_tool_color_path, options_color)
+        if by_tool_group_path and os.path.exists(str(by_tool_group_path)):
+            worksheet.insert_image(row_idx, 3, by_tool_group_path, options_group)
 
         for col_idx, header in enumerate(data_columns):
             value = getattr(row, header)
@@ -3562,16 +3822,15 @@ def save_results_to_excel(results_df, scale_factor=0.3):
             worksheet.write(row_idx, col_idx + 4, value, cell_to_use)
             col_widths[col_idx + 4] = max(col_widths.get(col_idx + 4, 0), len(str(value)))
 
-    worksheet.set_column(0, 0, image_column_width / 7)
-    worksheet.set_column(1, 1, image_column_width / 7)
-    worksheet.set_column(2, 2, image_column_width / 7)
-    worksheet.set_column(3, 3, image_column_width / 7)
+    for image_col_idx, displayed_width in enumerate(max_display_widths):
+        worksheet.set_column(
+            image_col_idx,
+            image_col_idx,
+            max(12, (displayed_width + 12) / 7)
+        )
 
     for col_idx, width in col_widths.items():
         worksheet.set_column(col_idx, col_idx, width + 5)
-
-    for row_idx in range(1, len(results_df) + 1):
-        worksheet.set_row(row_idx, max_image_height)
 
     workbook.close()
 
@@ -3587,7 +3846,7 @@ def resource_path(relative_path):
 
 # 常數定義
 HEADERS = ["Chart Info.", "Total Chart", "Weekly Chart", "By Tool (Color)", "By Tool (Group)"]
-OOB_KEYS = ['HL_P95_shift', 'HL_P50_shift', 'HL_P05_shift', 'HL_sticking_shift', 'HL_trending', 'HL_high_OOC', 'HL_3O7D', 'HL_by_tool_median_shift', 'HL_record_high_low', 'HL_category_LT_shift']
+OOB_KEYS = ['HL_P95_shift', 'HL_P50_shift', 'HL_P05_shift', 'HL_sticking_shift', 'HL_trending', 'HL_high_OOC', 'HL_OOS', 'HL_3O7D', 'HL_by_tool_shift', 'HL_record_high_low', 'HL_category_LT_shift']
 OOB_SUMMARY_KEYS = [key for key in OOB_KEYS if key != 'HL_record_high_low']
 
 
@@ -3663,19 +3922,28 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
     def __init__(self):
         super().__init__()
 
-        self.filepath = resource_path('input/All_Chart_Information.xlsx')
-        self.raw_data_directory = resource_path('input/raw_charts/')
+        self.user_settings = QtCore.QSettings("OSAT", "SupplierSPC")
+        default_excel_path = resource_path('input/All_Chart_Information.xlsx')
+        default_raw_path = resource_path('input/raw_charts/')
+        saved_excel_path = self.user_settings.value("workspace/excel_path", default_excel_path, type=str)
+        saved_raw_path = self.user_settings.value("workspace/raw_data_directory", default_raw_path, type=str)
+        self.filepath = saved_excel_path if os.path.isfile(saved_excel_path) else default_excel_path
+        self.raw_data_directory = saved_raw_path if os.path.isdir(saved_raw_path) else default_raw_path
         self.image_path = resource_path('image.png')
         self.results = []
         self.selected_analysis_chart_rows = None
 
         # 翻譯系統
         self.translator = get_translator()
+        saved_language = self.user_settings.value("ui/language", self.translator.current_lang, type=str)
+        if saved_language in ("ZH_TW", "EN", "KO"):
+            self.translator.current_lang = saved_language
         self.translator.register_observer(self)
 
         # 性能優化：添加快取
         self.csv_cache = {}  # CSV 文件快取
         self.chart_types_cache = {}  # 數據類型快取
+        self.by_tool_median_shift_cache = {}
         
         self.filter_type_combo = None
         self.filter_value_combo = None
@@ -3698,6 +3966,9 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.main_horizontal_layout = QtWidgets.QHBoxLayout(self.central_widget) # 主要的水平佈局
 
         self.init_ui()
+        saved_geometry = self.user_settings.value("ui/window_geometry")
+        if saved_geometry:
+            self.restoreGeometry(saved_geometry)
     
     def open_oob_settings(self):
         """打開 OOB 設定對話框"""
@@ -3709,9 +3980,38 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             # 用戶點擊保存，獲取新設定
             self.oob_settings = dialog.get_settings()
+            self._save_oob_user_settings()
             print(f"OOB 設定已更新: {self.oob_settings}")
         else:
             print("OOB 設定更改已取消")
+
+    def _load_oob_user_settings(self):
+        bool_keys = [
+            "show_charts_gui", "show_by_tool_charts", "run_by_tool_median_shift",
+            "use_interactive_charts", "use_batch_id_labels", "custom_time_range_enabled",
+            "show_by_tool_color", "show_by_tool_group",
+        ]
+        for key in bool_keys:
+            self.oob_settings[key] = self.user_settings.value(
+                f"oob/{key}", self.oob_settings[key], type=bool
+            )
+        self.oob_settings["by_tool_median_shift_k_threshold"] = self.user_settings.value(
+            "oob/by_tool_median_shift_k_threshold",
+            self.oob_settings["by_tool_median_shift_k_threshold"],
+            type=float
+        )
+        for key in ("start_time", "end_time"):
+            saved_value = self.user_settings.value(f"oob/{key}")
+            if saved_value:
+                parsed = QtCore.QDateTime.fromString(str(saved_value), QtCore.Qt.DateFormat.ISODate)
+                if parsed.isValid():
+                    self.oob_settings[key] = parsed
+
+    def _save_oob_user_settings(self):
+        for key, value in self.oob_settings.items():
+            if isinstance(value, QtCore.QDateTime):
+                value = value.toString(QtCore.Qt.DateFormat.ISODate)
+            self.user_settings.setValue(f"oob/{key}", value)
     
     def toggle_custom_time_range(self, checked):
         """切換自定義時間範圍的啟用/停用狀態"""
@@ -3843,6 +4143,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             QLabel {
                 font-size: 14px;
                 color: #000957;
+                background-color: transparent;
             }
             QProgressBar {
                 border-radius: 12px;
@@ -3956,7 +4257,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         # --- 左側選單區域 ---
         self.left_menu_widget = QtWidgets.QWidget()
-        self.left_menu_widget.setFixedWidth(205) # 設定選單寬度
+        self.left_menu_widget.setFixedWidth(230) # 設定選單寬度
         self.left_menu_widget.setStyleSheet("background-color: #344CB7;") # 選單背景色
         self.left_menu_layout = QtWidgets.QVBoxLayout(self.left_menu_widget)
         self.left_menu_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop) # 按鈕靠頂部對齊
@@ -4000,15 +4301,19 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.split_data_button = self._create_menu_button(f"1. {tr('split_data')}")
         self.data_check_button = self._create_menu_button(f"2. {tr('data_health_monitor')}")
         self.oob_system_button = self._create_menu_button(f"3. {tr('oob_spc_system')}")
-        self.cpk_calculation_button = self._create_menu_button(f"3. {tr('cpk_calculator')}")
+        self.cpk_calculation_button = self._create_menu_button(tr('cpk_calculator'))
         # --- 新增 Tool Matching 按鈕 ---
-        self.tool_matching_button = self._create_menu_button(f"3. {tr('tool_matching')}")
+        self.tool_matching_button = self._create_menu_button(tr('tool_matching'))
         # --- 新增 CL Tighten Calculator 按鈕 ---
-        self.cl_tighten_button = self._create_menu_button(f"3. {tr('cl_tighten')}")
+        self.cl_tighten_button = self._create_menu_button(tr('cl_tighten'))
         self.left_menu_layout.addWidget(self.home_button)
+        self.core_section_label = self._create_menu_section_label(tr("core_workflow", "核心流程"))
+        self.left_menu_layout.addWidget(self.core_section_label)
         self.left_menu_layout.addWidget(self.split_data_button)
         self.left_menu_layout.addWidget(self.data_check_button)
         self.left_menu_layout.addWidget(self.oob_system_button)
+        self.tools_section_label = self._create_menu_section_label(tr("analysis_tools", "分析工具"))
+        self.left_menu_layout.addWidget(self.tools_section_label)
         self.left_menu_layout.addWidget(self.cpk_calculation_button)
         self.left_menu_layout.addWidget(self.tool_matching_button)
         self.left_menu_layout.addWidget(self.cl_tighten_button)
@@ -4021,9 +4326,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.toggle_menu_button.clicked.connect(self.toggle_left_menu)
         self.main_horizontal_layout.addWidget(self.toggle_menu_button)
 
-        # --- 右側內容區域 (QStackedWidget) ---
+        # --- 右側內容區域：資料來源狀態列 + QStackedWidget ---
+        self.right_content_widget = QtWidgets.QWidget()
+        self.right_content_layout = QtWidgets.QVBoxLayout(self.right_content_widget)
+        self.right_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_content_layout.setSpacing(0)
+        self.workspace_header = self._create_workspace_header()
+        self.right_content_layout.addWidget(self.workspace_header)
         self.content_stacked_widget = QtWidgets.QStackedWidget()
-        self.main_horizontal_layout.addWidget(self.content_stacked_widget)
+        self.right_content_layout.addWidget(self.content_stacked_widget, 1)
+        self.main_horizontal_layout.addWidget(self.right_content_widget, 1)
 
         # 1. 首頁內容
         self.home_page = self._create_home_page()
@@ -4060,7 +4372,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             'show_charts_gui': True,
             'show_by_tool_charts': False,
             'run_by_tool_median_shift': False,
-            'by_tool_median_shift_k_threshold': 1.67,
+            'by_tool_median_shift_k_threshold': 2,
             'use_interactive_charts': True,
             'use_batch_id_labels': False,
             'custom_time_range_enabled': False,
@@ -4070,6 +4382,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             'show_by_tool_color': True,
             'show_by_tool_group': True
         }
+        self._load_oob_user_settings()
         
         # 按鈕區域 - 水平佈局
         button_layout = QHBoxLayout()
@@ -4098,6 +4411,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             }
         """)
         self.settings_button.clicked.connect(self.open_oob_settings)
+        self.settings_button.setToolTip(tr("oob_settings_hint", "設定圖表顯示、日期範圍與 By Tool 分析選項"))
         button_layout.addWidget(self.settings_button)
         
         # 啟動按鈕
@@ -4123,7 +4437,20 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             }
         """)
         self.start_button.clicked.connect(self.process_charts)
+        self.start_button.setToolTip(tr("start_oob_hint", "使用目前資料來源執行 OOB / SPC 分析"))
+        self.start_button.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
         button_layout.addWidget(self.start_button)
+
+        self.cancel_process_button = QtWidgets.QPushButton(tr("cancel", "取消"))
+        self.cancel_process_button.setEnabled(False)
+        self.cancel_process_button.clicked.connect(self.request_oob_cancel)
+        button_layout.addWidget(self.cancel_process_button)
+
+        self.open_results_button = QtWidgets.QPushButton(tr("open_results", "開啟結果"))
+        self.open_results_button.setEnabled(os.path.isfile(resource_path("result_with_images.xlsx")))
+        self.open_results_button.setToolTip(tr("open_results_hint", "開啟最近一次產生的 Excel 結果"))
+        self.open_results_button.clicked.connect(self.open_oob_results)
+        button_layout.addWidget(self.open_results_button)
         
         # 進度條 - 與按鈕水平對齊
         self.progress_bar = ModernProgressBar()
@@ -4146,6 +4473,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.image_grid_layout.setSpacing(5)       # 將整體間距從 20 縮減到 5
         self.image_grid_layout.setHorizontalSpacing(10) # 專門控制左右間距
         self.image_container.setWidget(self.image_grid_widget)
+        self._add_oob_empty_state()
         
         # 將 Chart Processing Tab 添加到 oob_system_tabs
         self.oob_system_tabs.addTab(self.processing_tab_widget, tr("chart_processing"))
@@ -4186,6 +4514,200 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         # 預設隱藏摺疊按鈕（因為首頁不需要）
         self.toggle_menu_button.hide()
+        self._refresh_workspace_status()
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+1"), self, activated=lambda: self._navigate_to("split"))
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+2"), self, activated=lambda: self._navigate_to("health"))
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+3"), self, activated=lambda: self._navigate_to("oob"))
+
+    def _create_menu_section_label(self, text):
+        label = QtWidgets.QLabel(text)
+        label.setStyleSheet(
+            "color: rgba(255,255,255,0.72); background: transparent; "
+            "font-size: 11px; font-weight: 700; padding: 8px 10px 0 10px;"
+        )
+        return label
+
+    def _create_workspace_header(self):
+        header = QtWidgets.QFrame()
+        header.setObjectName("WorkspaceHeader")
+        header.setStyleSheet("""
+            QFrame#WorkspaceHeader {
+                background: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+            }
+            QLabel#WorkspaceTitle {
+                color: #0F172A; font-size: 13px; font-weight: 700;
+                background-color: transparent;
+            }
+            QLabel#WorkspaceDetails {
+                color: #64748B; font-size: 12px; font-weight: 400;
+                background-color: transparent;
+            }
+            QPushButton {
+                background: #FFFFFF; color: #344CB7; border: 1px solid #C7D2FE;
+                border-radius: 6px; padding: 6px 12px; font-size: 12px;
+            }
+            QPushButton:hover { background: #EEF2FF; }
+        """)
+        layout = QtWidgets.QHBoxLayout(header)
+        layout.setContentsMargins(18, 10, 18, 10)
+        info_layout = QtWidgets.QVBoxLayout()
+        info_layout.setSpacing(2)
+        self.workspace_title_label = QtWidgets.QLabel(tr("current_data_source", "目前資料來源"))
+        self.workspace_title_label.setObjectName("WorkspaceTitle")
+        self.workspace_details_label = QtWidgets.QLabel()
+        self.workspace_details_label.setObjectName("WorkspaceDetails")
+        self.workspace_details_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        info_layout.addWidget(self.workspace_title_label)
+        info_layout.addWidget(self.workspace_details_label)
+        layout.addLayout(info_layout, 1)
+        self.change_workspace_button = QtWidgets.QPushButton(tr("change_data_source", "更換資料"))
+        self.change_workspace_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.change_workspace_button.clicked.connect(self.choose_workspace_sources)
+        layout.addWidget(self.change_workspace_button)
+        return header
+
+    def _refresh_workspace_status(self):
+        excel_name = os.path.basename(self.filepath) if self.filepath else "-"
+        raw_name = os.path.basename(os.path.normpath(self.raw_data_directory)) if self.raw_data_directory else "-"
+        try:
+            csv_count = sum(1 for name in os.listdir(self.raw_data_directory) if name.lower().endswith(".csv"))
+        except OSError:
+            csv_count = 0
+        self.workspace_details_label.setText(
+            tr("workspace_details", "Excel：{excel}　Raw Data：{raw}　CSV：{count} 個").format(
+                excel=excel_name, raw=raw_name, count=csv_count
+            )
+        )
+        self.workspace_details_label.setToolTip(
+            f"{tr('excel_file', 'Excel')}: {self.filepath}\n"
+            f"{tr('raw_data_folder', 'Raw Data')}: {self.raw_data_directory}"
+        )
+        self._refresh_home_status()
+
+    def choose_workspace_sources(self):
+        excel_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            tr("select_chart_information", "選擇 Chart Information Excel"),
+            os.path.dirname(self.filepath) if self.filepath else resource_path("input"),
+            "Excel Files (*.xlsx *.xls)"
+        )
+        if not excel_path:
+            return
+        raw_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            tr("select_raw_data_folder", "選擇 Raw Data 資料夾"),
+            self.raw_data_directory or resource_path("input")
+        )
+        if not raw_dir:
+            return
+        self.apply_workspace_paths(excel_path, raw_dir)
+
+    def apply_workspace_paths(self, excel_path, raw_dir):
+        self.filepath = os.path.normpath(excel_path)
+        self.raw_data_directory = os.path.normpath(raw_dir)
+        self.user_settings.setValue("workspace/excel_path", self.filepath)
+        self.user_settings.setValue("workspace/raw_data_directory", self.raw_data_directory)
+        if hasattr(self, "data_check_page"):
+            self.data_check_page.update_paths(self.filepath, self.raw_data_directory)
+        if hasattr(self, "cl_tighten_page"):
+            self.cl_tighten_page.filepath = self.filepath
+            self.cl_tighten_page.raw_data_directory = self.raw_data_directory
+        if hasattr(self, "tool_matching_page") and hasattr(self.tool_matching_page, "update_paths"):
+            self.tool_matching_page.update_paths(self.filepath, self.raw_data_directory)
+        if hasattr(self, "cpk_calculation_page") and hasattr(self.cpk_calculation_page, "update_paths"):
+            self.cpk_calculation_page.update_paths(self.filepath, self.raw_data_directory)
+        self.csv_cache.clear()
+        self.results = []
+        if hasattr(self, "image_grid_layout"):
+            self.clear_image_grid()
+            self._add_oob_empty_state()
+        self._refresh_workspace_status()
+
+    def _navigate_to(self, page_name):
+        pages = {
+            "home": ("home_page", "home_button"),
+            "split": ("split_data_page", "split_data_button"),
+            "health": ("data_check_page", "data_check_button"),
+            "oob": ("oob_system_tabs", "oob_system_button"),
+            "cpk": ("cpk_calculation_page", "cpk_calculation_button"),
+            "matching": ("tool_matching_page", "tool_matching_button"),
+            "cl": ("cl_tighten_page", "cl_tighten_button"),
+        }
+        page_attr, button_attr = pages[page_name]
+        page = getattr(self, page_attr, None)
+        button = getattr(self, button_attr, None)
+        if page is not None:
+            self.content_stacked_widget.setCurrentWidget(page)
+        if button is not None:
+            button.setChecked(True)
+
+    def _refresh_home_status(self):
+        if not hasattr(self, "home_source_value"):
+            return
+        excel_ok = os.path.isfile(self.filepath)
+        raw_ok = os.path.isdir(self.raw_data_directory)
+        try:
+            csv_count = sum(1 for name in os.listdir(self.raw_data_directory) if name.lower().endswith(".csv"))
+        except OSError:
+            csv_count = 0
+        self.home_source_value.setText(os.path.basename(self.filepath) if excel_ok else tr("file_not_found", "找不到檔案"))
+        self.home_raw_value.setText(tr("csv_file_count", "{count} 個 CSV").format(count=csv_count))
+        ready = excel_ok and raw_ok and csv_count > 0
+        self.home_ready_value.setText(tr("ready_for_analysis", "可以開始分析") if ready else tr("data_setup_required", "需要設定資料"))
+        self.home_ready_value.setStyleSheet(f"color: {'#059669' if ready else '#DC2626'}; font-weight: 700;")
+        self.home_last_run_value.setText(
+            self.user_settings.value("history/last_oob_run", tr("never_run", "尚未執行"), type=str)
+        )
+
+    def _refresh_home_texts(self):
+        if not hasattr(self, "home_title_label"):
+            return
+        self.home_eyebrow_label.setText(tr("guided_workflow", "引導式工作流程"))
+        self.home_title_label.setText(tr("home_welcome", "歡迎使用 Supplier SPC"))
+        self.home_subtitle_label.setText(
+            tr("home_subtitle", "依照三個步驟完成資料準備、健檢與 OOB 分析，或直接使用下方分析工具。")
+        )
+        self.home_workflow_label.setText(tr("core_workflow", "核心流程"))
+        self.home_tools_label.setText(tr("analysis_tools", "分析工具"))
+        for label, text in zip(self.home_status_title_labels, [
+            tr("chart_information", "Chart Information"),
+            tr("raw_data", "Raw Data"),
+            tr("analysis_readiness", "分析狀態"),
+            tr("last_analysis", "上次分析"),
+        ]):
+            label.setText(text)
+        step_texts = {
+            "split": (
+                tr("split_data", "資料拆分"),
+                tr("home_split_desc", "匯入原始 CSV、預覽格式並產生標準 raw charts。"),
+                tr("start", "開始"),
+            ),
+            "health": (
+                tr("data_health_monitor", "資料健檢"),
+                tr("home_health_desc", "先確認 Excel 設定、CSV 欄位與資料完整性。"),
+                tr("start_check", "開始檢查"),
+            ),
+            "oob": (
+                tr("oob_spc_system", "OOB / SPC 分析"),
+                tr("home_oob_desc", "產生管制圖、異常規則結果與摘要儀表板。"),
+                tr("start_analysis", "開始分析"),
+            ),
+        }
+        for page, values in step_texts.items():
+            title_label, body_label, action_button = self.home_step_cards[page]
+            title_label.setText(values[0])
+            body_label.setText(values[1])
+            action_button.setText(values[2])
+        self.home_tool_buttons["cpk"].setText(tr("cpk_calculator", "Cpk Calculator"))
+        self.home_tool_buttons["matching"].setText(tr("tool_matching", "Tool Matching"))
+        self.home_tool_buttons["cl"].setText(tr("cl_tighten", "CL Tighten"))
+
+    def closeEvent(self, event):
+        self.user_settings.setValue("ui/window_geometry", self.saveGeometry())
+        self.user_settings.setValue("ui/language", self.translator.current_lang)
+        self.user_settings.sync()
+        super().closeEvent(event)
     def _create_tool_matching_page(self):
         """
         建立 Tool Matching 頁面 (Widget)。
@@ -4222,6 +4744,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
     def toggle_language(self):
         """切換語言"""
         new_lang = self.translator.toggle_language()
+        self.user_settings.setValue("ui/language", new_lang)
         print(f"Language switched to: {new_lang}")
         # 更新語言按鈕文字
         self.lang_button.setText(tr("lang_button"))
@@ -4236,9 +4759,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.split_data_button.setText(f"1. {tr('split_data')}")
         self.data_check_button.setText(f"2. {tr('data_health_monitor')}")
         self.oob_system_button.setText(f"3. {tr('oob_spc_system')}")
-        self.cpk_calculation_button.setText(f"3. {tr('cpk_calculator')}")
-        self.tool_matching_button.setText(f"3. {tr('tool_matching')}")
-        self.cl_tighten_button.setText(f"3. {tr('cl_tighten')}")
+        self.cpk_calculation_button.setText(tr('cpk_calculator'))
+        self.tool_matching_button.setText(tr('tool_matching'))
+        self.cl_tighten_button.setText(tr('cl_tighten'))
+        if hasattr(self, "core_section_label"):
+            self.core_section_label.setText(tr("core_workflow", "核心流程"))
+            self.tools_section_label.setText(tr("analysis_tools", "分析工具"))
+            self.workspace_title_label.setText(tr("current_data_source", "目前資料來源"))
+            self.change_workspace_button.setText(tr("change_data_source", "更換資料"))
+            self._refresh_workspace_status()
+            self._refresh_home_texts()
         
         # 更新按鈕文字
         if hasattr(self, 'settings_button'):
@@ -4246,6 +4776,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         if hasattr(self, 'start_button'):
             self.start_button.setText(f"▶ {tr('start_process')}")
+            self.open_results_button.setText(tr("open_results", "開啟結果"))
+            self.cancel_process_button.setText(tr("cancel", "取消"))
         
         # 更新 OOB System 標籤頁標題
         if hasattr(self, 'oob_system_tabs'):
@@ -4257,7 +4789,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             self.summary_title_label.setText(f"<b>{tr('summary_dashboard')}</b><br><span style='font-size:12px; color:#64748B; font-weight:400;'>OOB / SPC health overview</span>")
             self.violation_table_label.setText(f"<b>{tr('charts_with_anomalies_details')}</b>")
             # 更新表頭
-            headers = [tr('group_name'), tr('chart_name'), tr('ooc_count'), tr('we_rules'), tr('oob_rules')]
+            headers = [tr('group_name'), tr('chart_name'), tr('ooc_count'), tr('oos_count', 'OOS Count'), tr('we_rules'), tr('oob_rules')]
             self.violation_table.setHorizontalHeaderLabels(headers)
             
             # 更新統計數字標籤的前綴文字（保留數字部分）
@@ -4306,6 +4838,24 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     self.ooc_charts_label_summary.setText(f"{tr('charts_with_ooc')} {number_part}")
                 else:
                     self.ooc_charts_label_summary.setText(f"{tr('charts_with_ooc')} N/A")
+
+            if hasattr(self, 'oos_charts_label_summary'):
+                current_text = self.oos_charts_label_summary.text()
+                number_part = current_text.split()[-1] if current_text.split() else 'N/A'
+                if not number_part.replace(',', '').isdigit():
+                    number_part = 'N/A'
+                self.oos_charts_label_summary.setText(
+                    f"{tr('charts_with_oos', '含 OOS 圖表：')} {number_part}"
+                )
+
+            if hasattr(self, 'record_risk_charts_label_summary'):
+                current_text = self.record_risk_charts_label_summary.text()
+                number_part = current_text.split()[-1] if current_text.split() else 'N/A'
+                if not number_part.replace(',', '').isdigit():
+                    number_part = 'N/A'
+                self.record_risk_charts_label_summary.setText(
+                    f"{tr('charts_with_record_risk', 'Record High/Low Medium+：')} {number_part}"
+                )
             
             if hasattr(self, 'we_count_charts_label_summary'):
                 current_text = self.we_count_charts_label_summary.text()
@@ -4350,13 +4900,133 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
     # --- 新增首頁和拆分資料頁面的佔位符方法 ---
     def _create_home_page(self):
-            widget = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(widget)
-            # Update the label content for "Welcome to Supplier SPC!"
-            label = QtWidgets.QLabel("<h1>Welcome to Supplier SPC!</h1><p>Please select an option from the left menu.</p>")
-            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(label)
-            return widget
+        widget = QtWidgets.QWidget()
+        widget.setObjectName("HomePage")
+        widget.setStyleSheet("""
+            QWidget#HomePage { background: #F4F6F9; }
+            QFrame#HomeStatusCard, QFrame#HomeStepCard {
+                background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px;
+            }
+            QLabel#HomeEyebrow { color: #344CB7; font-size: 12px; font-weight: 700; }
+            QLabel#HomeTitle { color: #0F172A; font-size: 28px; font-weight: 800; }
+            QLabel#HomeSubtitle { color: #64748B; font-size: 14px; font-weight: 400; }
+            QLabel#HomeCardTitle { color: #0F172A; font-size: 16px; font-weight: 700; }
+            QLabel#HomeCardBody { color: #64748B; font-size: 12px; font-weight: 400; }
+        """)
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(20)
+
+        self.home_eyebrow_label = QtWidgets.QLabel(tr("guided_workflow", "GUIDED WORKFLOW"))
+        self.home_eyebrow_label.setObjectName("HomeEyebrow")
+        self.home_title_label = QtWidgets.QLabel(tr("home_welcome", "歡迎使用 Supplier SPC"))
+        self.home_title_label.setObjectName("HomeTitle")
+        self.home_subtitle_label = QtWidgets.QLabel(
+            tr("home_subtitle", "依照三個步驟完成資料準備、健檢與 OOB 分析，或直接使用下方分析工具。")
+        )
+        self.home_subtitle_label.setObjectName("HomeSubtitle")
+        self.home_subtitle_label.setWordWrap(True)
+        layout.addWidget(self.home_eyebrow_label)
+        layout.addWidget(self.home_title_label)
+        layout.addWidget(self.home_subtitle_label)
+
+        status_card = QtWidgets.QFrame()
+        status_card.setObjectName("HomeStatusCard")
+        status_layout = QtWidgets.QGridLayout(status_card)
+        status_layout.setContentsMargins(20, 16, 20, 16)
+        status_layout.setHorizontalSpacing(28)
+        status_fields = [
+            (tr("chart_information", "Chart Information"), "home_source_value"),
+            (tr("raw_data", "Raw Data"), "home_raw_value"),
+            (tr("analysis_readiness", "分析狀態"), "home_ready_value"),
+            (tr("last_analysis", "上次分析"), "home_last_run_value"),
+        ]
+        self.home_status_title_labels = []
+        for column, (title, attr_name) in enumerate(status_fields):
+            title_label = QtWidgets.QLabel(title)
+            title_label.setObjectName("HomeCardBody")
+            self.home_status_title_labels.append(title_label)
+            value_label = QtWidgets.QLabel("-")
+            value_label.setObjectName("HomeCardTitle")
+            setattr(self, attr_name, value_label)
+            status_layout.addWidget(title_label, 0, column)
+            status_layout.addWidget(value_label, 1, column)
+        change_button = QtWidgets.QPushButton(tr("change_data_source", "更換資料"))
+        change_button.clicked.connect(self.choose_workspace_sources)
+        status_layout.addWidget(change_button, 0, 4, 2, 1)
+        layout.addWidget(status_card)
+
+        self.home_workflow_label = QtWidgets.QLabel(tr("core_workflow", "核心流程"))
+        self.home_workflow_label.setObjectName("HomeCardTitle")
+        layout.addWidget(self.home_workflow_label)
+        self.home_step_cards = {}
+        workflow_layout = QtWidgets.QHBoxLayout()
+        workflow_layout.setSpacing(14)
+        workflow_layout.addWidget(self._make_home_step_card(
+            "1", tr("split_data", "資料拆分"),
+            tr("home_split_desc", "匯入原始 CSV、預覽格式並產生標準 raw charts。"),
+            tr("start", "開始"), "split"
+        ))
+        workflow_layout.addWidget(self._make_home_step_card(
+            "2", tr("data_health_monitor", "資料健檢"),
+            tr("home_health_desc", "先確認 Excel 設定、CSV 欄位與資料完整性。"),
+            tr("start_check", "開始檢查"), "health"
+        ))
+        workflow_layout.addWidget(self._make_home_step_card(
+            "3", tr("oob_spc_system", "OOB / SPC 分析"),
+            tr("home_oob_desc", "產生管制圖、異常規則結果與摘要儀表板。"),
+            tr("start_analysis", "開始分析"), "oob"
+        ))
+        layout.addLayout(workflow_layout)
+
+        self.home_tools_label = QtWidgets.QLabel(tr("analysis_tools", "分析工具"))
+        self.home_tools_label.setObjectName("HomeCardTitle")
+        layout.addWidget(self.home_tools_label)
+        tool_layout = QtWidgets.QHBoxLayout()
+        tool_layout.setSpacing(10)
+        self.home_tool_buttons = {}
+        for title, page_name in [
+            (tr("cpk_calculator", "Cpk Calculator"), "cpk"),
+            (tr("tool_matching", "Tool Matching"), "matching"),
+            (tr("cl_tighten", "CL Tighten"), "cl"),
+        ]:
+            button = QtWidgets.QPushButton(title)
+            button.setMinimumHeight(44)
+            button.clicked.connect(lambda checked=False, page=page_name: self._navigate_to(page))
+            tool_layout.addWidget(button)
+            self.home_tool_buttons[page_name] = button
+        tool_layout.addStretch()
+        layout.addLayout(tool_layout)
+        layout.addStretch()
+        return widget
+
+    def _make_home_step_card(self, number, title, description, action_text, page_name):
+        card = QtWidgets.QFrame()
+        card.setObjectName("HomeStepCard")
+        card.setMinimumHeight(170)
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 16, 18, 16)
+        number_label = QtWidgets.QLabel(number)
+        number_label.setFixedSize(30, 30)
+        number_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        number_label.setStyleSheet(
+            "background:#EEF2FF; color:#344CB7; border-radius:15px; font-size:13px; font-weight:800;"
+        )
+        title_label = QtWidgets.QLabel(title)
+        title_label.setObjectName("HomeCardTitle")
+        body_label = QtWidgets.QLabel(description)
+        body_label.setObjectName("HomeCardBody")
+        body_label.setWordWrap(True)
+        action_button = QtWidgets.QPushButton(action_text)
+        action_button.setMinimumHeight(38)
+        action_button.clicked.connect(lambda checked=False, page=page_name: self._navigate_to(page))
+        card_layout.addWidget(number_label)
+        card_layout.addWidget(title_label)
+        card_layout.addWidget(body_label, 1)
+        card_layout.addWidget(action_button)
+        if hasattr(self, "home_step_cards"):
+            self.home_step_cards[page_name] = (title_label, body_label, action_button)
+        return card
     def _create_split_data_page(self):
         """
         這個方法現在會創建並返回你的 SplitDataWidget 實例。
@@ -4434,16 +5104,23 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.processed_charts_label_summary = QtWidgets.QLabel(f"{tr('processed_successfully')} N/A")
         self.skipped_charts_label_summary = QtWidgets.QLabel(f"{tr('no_data_charts')} N/A")
         self.ooc_charts_label_summary = QtWidgets.QLabel(f"{tr('charts_with_ooc')} N/A")
+        self.oos_charts_label_summary = QtWidgets.QLabel(f"{tr('charts_with_oos', '含 OOS 圖表：')} N/A")
+        self.record_risk_charts_label_summary = QtWidgets.QLabel(
+            f"{tr('charts_with_record_risk', 'Record High/Low Medium+：')} N/A"
+        )
         self.we_count_charts_label_summary = QtWidgets.QLabel(f"{tr('charts_with_we_rule')} N/A")
         self.oob_charts_label_summary = QtWidgets.QLabel(f"{tr('charts_with_oob')} N/A")
 
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.total_charts_label_summary, "#344CB7"), 0, 0)
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.processed_charts_label_summary, "#10b981"), 0, 1)
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.skipped_charts_label_summary, "#94a3b8"), 0, 2)
+        # Fifteen grid columns keep three status cards and five anomaly cards equal-width.
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.total_charts_label_summary, "#344CB7"), 0, 0, 1, 5)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.processed_charts_label_summary, "#10b981"), 0, 5, 1, 5)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.skipped_charts_label_summary, "#94a3b8"), 0, 10, 1, 5)
 
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.ooc_charts_label_summary, "#ef4444"), 1, 0)
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.we_count_charts_label_summary, "#f59e0b"), 1, 1)
-        summary_stats_layout.addWidget(self.create_summary_metric_card(self.oob_charts_label_summary, "#8b5cf6"), 1, 2)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.ooc_charts_label_summary, "#ef4444"), 1, 0, 1, 3)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.oos_charts_label_summary, "#f97316"), 1, 3, 1, 3)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.we_count_charts_label_summary, "#f59e0b"), 1, 6, 1, 3)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.oob_charts_label_summary, "#8b5cf6"), 1, 9, 1, 3)
+        summary_stats_layout.addWidget(self.create_summary_metric_card(self.record_risk_charts_label_summary, "#db2777"), 1, 12, 1, 3)
 
         summary_stats_layout.setSpacing(15)
 
@@ -4452,6 +5129,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         # --- 圖表顯示區域 ---
         self.charts_main_layout = QtWidgets.QVBoxLayout()
         self.charts_horizontal_layout = QtWidgets.QHBoxLayout()
+        self.charts_horizontal_layout.setSpacing(16)
         self.charts_main_layout.addLayout(self.charts_horizontal_layout)
         summary_layout.addLayout(self.charts_main_layout)
 
@@ -4461,9 +5139,23 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.violation_table_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
         summary_layout.addWidget(self.violation_table_label)
 
+        violation_toolbar = QtWidgets.QHBoxLayout()
+        self.violation_search_input = QtWidgets.QLineEdit()
+        self.violation_search_input.setPlaceholderText(tr("search_group_chart", "搜尋 Group 或 Chart"))
+        self.violation_search_input.setClearButtonEnabled(True)
+        self.violation_search_input.textChanged.connect(self.filter_violation_table)
+        self.violation_type_combo = QtWidgets.QComboBox()
+        self.violation_type_combo.addItems([
+            tr("all_anomalies", "所有異常"), "OOC", "WE Rule", "OOB Rule"
+        ])
+        self.violation_type_combo.currentIndexChanged.connect(self.filter_violation_table)
+        violation_toolbar.addWidget(self.violation_search_input, 1)
+        violation_toolbar.addWidget(self.violation_type_combo)
+        summary_layout.addLayout(violation_toolbar)
+
         self.violation_table = QtWidgets.QTableWidget()
-        self.violation_table.setColumnCount(5)
-        headers = [tr('group_name'), tr('chart_name'), tr('ooc_count'), tr('we_rules'), tr('oob_rules')]
+        self.violation_table.setColumnCount(6)
+        headers = [tr('group_name'), tr('chart_name'), tr('ooc_count'), tr('oos_count', 'OOS Count'), tr('we_rules'), tr('oob_rules')]
         self.violation_table.setHorizontalHeaderLabels(headers)
         self.violation_table.horizontalHeader().setStretchLastSection(True)
         self.violation_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
@@ -4478,16 +5170,64 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.violation_table.verticalHeader().setDefaultSectionSize(36)
         self.violation_table.setWordWrap(True)
         self.violation_table.setMinimumHeight(260)
-        summary_layout.addWidget(self.violation_table)
-
-        summary_layout.addStretch()
+        self.violation_table.setToolTip(tr("open_chart_hint", "雙擊資料列可跳到對應的分析圖表"))
+        self.violation_table.cellDoubleClicked.connect(self.open_violation_chart)
+        summary_layout.addWidget(self.violation_table, 1)
 
         summary_layout.setContentsMargins(20, 20, 20, 20)
         summary_layout.setSpacing(20)
+        summary_layout.setStretch(2, 0)
+        summary_layout.setStretch(4, 1)
         
         # 注意: setup_summary_dashboard_tab 不再呼叫 self.addTab，
         # 因為它會被 oob_system_tabs 呼叫
     # --- 繪製圖表的輔助方法 ---
+
+    def filter_violation_table(self):
+        if not hasattr(self, "violation_table"):
+            return
+        query = self.violation_search_input.text().strip().lower()
+        filter_index = self.violation_type_combo.currentIndex()
+        for row in range(self.violation_table.rowCount()):
+            group_item = self.violation_table.item(row, 0)
+            chart_item = self.violation_table.item(row, 1)
+            combined = " ".join([
+                group_item.text() if group_item else "",
+                chart_item.text() if chart_item else "",
+            ]).lower()
+            matches_text = not query or query in combined
+            matches_type = True
+            if filter_index == 1:
+                value = self.violation_table.item(row, 2)
+                matches_type = value is not None and value.text() not in ("", "0", "N/A")
+            elif filter_index == 2:
+                value = self.violation_table.item(row, 4)
+                matches_type = value is not None and value.text() not in ("", "0", "N/A", "None")
+            elif filter_index == 3:
+                value = self.violation_table.item(row, 5)
+                matches_type = value is not None and value.text() not in ("", "0", "N/A", "None")
+            self.violation_table.setRowHidden(row, not (matches_text and matches_type))
+
+    def open_violation_chart(self, row, _column):
+        group_item = self.violation_table.item(row, 0)
+        chart_item = self.violation_table.item(row, 1)
+        if group_item is None or chart_item is None:
+            return
+        group_name = group_item.text()
+        chart_name = chart_item.text()
+        result_index = next((
+            index for index, result in enumerate(self.results)
+            if str(result.get("group_name", "")) == group_name
+            and str(result.get("chart_name", "")) == chart_name
+        ), None)
+        if result_index is None:
+            return
+        self.oob_system_tabs.setCurrentIndex(0)
+        grid_item = self.image_grid_layout.itemAtPosition(result_index, 0)
+        if grid_item and grid_item.layout() and grid_item.layout().count():
+            anchor = grid_item.layout().itemAt(0).widget()
+            if anchor is not None:
+                self.image_container.ensureWidgetVisible(anchor, 20, 20)
 
     def create_summary_metric_card(self, label, accent_color):
         card = QtWidgets.QFrame()
@@ -4510,19 +5250,21 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         layout.addWidget(label, 1)
         return card
 
-    def add_summary_chart_card(self, title, canvas):
+    def add_summary_chart_card(self, title, canvas, subtitle=None):
         card = QtWidgets.QFrame()
         card.setObjectName("SummaryChartCard")
-        card.setMinimumSize(300, 300)
+        card.setMinimumSize(300, 250)
+        card.setMaximumHeight(320)
 
         layout = QtWidgets.QVBoxLayout(card)
         layout.setContentsMargins(10, 8, 10, 10)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
         title_label = QtWidgets.QLabel(title)
         title_label.setObjectName("SummaryChartTitle")
         title_label.setFont(get_app_font(11, QtGui.QFont.Weight.Bold))
         layout.addWidget(title_label)
+
         layout.addWidget(canvas, 1)
 
         self.charts_horizontal_layout.addWidget(card, 1)
@@ -4554,13 +5296,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             autotext.set_fontsize(10)
             autotext.set_fontweight('bold')
             autotext.set_color('#ffffff' if i == 0 else '#182033')
-        ax.text(0, 0.06, str(total), ha='center', va='center',
+        processed_rate = 0 if total == 0 else round((processed / total) * 100)
+        ax.text(0, 0.06, f"{processed_rate}%", ha='center', va='center',
                 fontsize=18, fontweight='bold', color='#182033')
-        ax.text(0, -0.13, tr('total_charts'), ha='center', va='center',
+        ax.text(0, -0.13, f"{processed}/{total} {tr('processed')}", ha='center', va='center',
                 fontsize=8, color='#64748B')
         ax.axis('equal')
 
-        fig.subplots_adjust(left=0.08, right=0.92, top=0.9, bottom=0.08)
+        fig.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.1)
 
         fig.patch.set_alpha(0)
 
@@ -4603,11 +5346,11 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         rate = 0 if processed_count == 0 else round((violating_count / processed_count) * 100)
         ax.text(0, 0.06, f"{rate}%", ha='center', va='center',
                 fontsize=18, fontweight='bold', color='#182033')
-        ax.text(0, -0.13, tr('violating'), ha='center', va='center',
+        ax.text(0, -0.13, f"{violating_count}/{processed_count} {tr('violating')}", ha='center', va='center',
                 fontsize=8, color='#64748B')
         ax.axis('equal')
 
-        fig.subplots_adjust(left=0.08, right=0.92, top=0.9, bottom=0.08)
+        fig.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.1)
 
         fig.patch.set_alpha(0)
 
@@ -4631,15 +5374,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     va='bottom', ha='center', fontsize=9,
                     color='#182033', fontweight='bold')
 
-        ax.set_ylabel(tr('number_of_charts'), fontsize=10)
         ax.set_ylim(0, max(counts) * 1.2 or 1)
-        ax.grid(axis='y', color='#e5e7eb', linewidth=0.8)
-        ax.set_axisbelow(True)
+        ax.grid(False)
+        ax.yaxis.set_visible(False)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.spines['left'].set_color('#cbd5e1')
-        ax.spines['bottom'].set_color('#cbd5e1')
-        ax.tick_params(axis='both', labelsize=9, colors='#334155')
+        ax.spines['left'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.tick_params(axis='x', labelsize=9, colors='#334155', length=0)
 
         fig.tight_layout()
         fig.patch.set_alpha(0)
@@ -4711,7 +5453,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             # 重新繪製圖表
             if total > 0:
                 self.status_pie_canvas = self.create_status_pie_chart(processed, skipped)
-                self.add_summary_chart_card(tr('overall_processing_status'), self.status_pie_canvas)
+                self.add_summary_chart_card(
+                    tr('overall_processing_status'),
+                    self.status_pie_canvas
+                )
             
             if processed > 0:
                 # 計算違規圖表數量
@@ -4720,11 +5465,17 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     has_ooc = result.get('ooc_cnt', 0) > 0
                     has_we = result.get('WE_Rule', '') and result.get('WE_Rule', '') != 'N/A'
                     has_oob = result.get('OOB_Rule', '') and result.get('OOB_Rule', '') != 'N/A'
-                    if has_ooc or has_we or has_oob:
+                    has_record_risk = str(result.get('record_high_low_risk', 'NONE')).upper() in {
+                        'MEDIUM', 'HIGH', 'CRITICAL'
+                    }
+                    if has_ooc or has_we or has_oob or has_record_risk:
                         violating_count += 1
                 
                 self.processed_violation_pie_canvas = self.create_processed_violation_pie_chart(processed, violating_count)
-                self.add_summary_chart_card(tr('violation_rate'), self.processed_violation_pie_canvas)
+                self.add_summary_chart_card(
+                    tr('violation_rate'),
+                    self.processed_violation_pie_canvas
+                )
             
             if ooc_count > 0 or we_count > 0 or oob_count > 0:
                 self.anomaly_bar_canvas = self.create_anomaly_bar_chart(ooc_count, we_count, oob_count)
@@ -4739,6 +5490,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         print("\nUpdating Summary Dashboard...")
         ooc_count = 0
+        oos_count = 0
+        record_risk_count = 0
         we_count = 0
         oob_count = 0
 
@@ -4746,21 +5499,31 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         for result in self.results: # self.results 已經是成功處理的圖表結果列表
             has_ooc = result.get('ooc_cnt', 0) > 0
+            has_oos = result.get('oos_cnt', 0) > 0
+            has_record_risk = str(result.get('record_high_low_risk', 'NONE')).upper() in {
+                'MEDIUM', 'HIGH', 'CRITICAL'
+            }
             has_we = result.get('WE_Rule', '') and result.get('WE_Rule', '') != 'N/A'
             has_oob = result.get('OOB_Rule', '') and result.get('OOB_Rule', '') != 'N/A'
 
             if has_ooc:
                  ooc_count += 1
+            if has_oos:
+                 oos_count += 1
+            if has_record_risk:
+                 record_risk_count += 1
             if has_we:
                  we_count += 1
             if has_oob:
                  oob_count += 1
 
-            if has_ooc or has_we or has_oob:
+            if has_ooc or has_we or has_oob or has_record_risk:
                 violating_charts.append(result)
 
 
         print(f"DEBUG: Calculated OOC chart count: {ooc_count}")
+        print(f"DEBUG: Calculated OOS chart count: {oos_count}")
+        print(f"DEBUG: Calculated Record High/Low Medium+ chart count: {record_risk_count}")
         print(f"DEBUG: Calculated WE_Rule chart count: {we_count}")
         print(f"DEBUG: Calculated OOB chart count: {oob_count}")
         print(f"DEBUG: Number of violating charts: {len(violating_charts)}")
@@ -4771,6 +5534,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.processed_charts_label_summary.setText(f"{tr('processed_successfully')} {processed}")
         self.skipped_charts_label_summary.setText(f"{tr('no_data_charts')} {skipped}")
         self.ooc_charts_label_summary.setText(f"{tr('charts_with_ooc')} {ooc_count}")
+        self.oos_charts_label_summary.setText(f"{tr('charts_with_oos', '含 OOS 圖表：')} {oos_count}")
+        self.record_risk_charts_label_summary.setText(
+            f"{tr('charts_with_record_risk', 'Record High/Low Medium+：')} {record_risk_count}"
+        )
         self.we_count_charts_label_summary.setText(f"{tr('charts_with_we_rule')} {we_count}")
         self.oob_charts_label_summary.setText(f"{tr('charts_with_oob')} {oob_count}")
 
@@ -4780,7 +5547,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
         if total > 0:
              self.status_pie_canvas = self.create_status_pie_chart(processed, skipped)
-             self.add_summary_chart_card(tr('overall_processing_status'), self.status_pie_canvas)
+             self.add_summary_chart_card(
+                 tr('overall_processing_status'),
+                 self.status_pie_canvas
+             )
 
 
         # 添加成功處理圖表違規比例甜甜圈圖 (中間圖)
@@ -4789,12 +5559,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
              # violating_charts 列表已經是從 self.results (已處理圖表) 中篩選的
              violating_count_in_processed = len(violating_charts)
              self.processed_violation_pie_canvas = self.create_processed_violation_pie_chart(processed, violating_count_in_processed)
-             self.add_summary_chart_card(tr('violation_rate'), self.processed_violation_pie_canvas)
+             self.add_summary_chart_card(
+                 tr('violation_rate'),
+                 self.processed_violation_pie_canvas
+             )
 
         if ooc_count > 0 or we_count > 0 or oob_count > 0:
              self.anomaly_bar_canvas = self.create_anomaly_bar_chart(ooc_count, we_count, oob_count)
              self.add_summary_chart_card(tr('charts_with_anomalies'), self.anomaly_bar_canvas)
 
+        self.violation_table.setSortingEnabled(False)
         self.violation_table.setRowCount(len(violating_charts))
 
 
@@ -4820,6 +5594,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             print(f"DEBUG: 表格第 {row_index} 行 - 轉換後: group_name='{group_name}', chart_name='{chart_name}'")
 
             ooc_cnt = result.get('ooc_cnt', 0)
+            oos_cnt = result.get('oos_cnt', 0)
             we_rules = result.get('WE_Rule', 'N/A')
             oob_rules = result.get('OOB_Rule', 'N/A')
 
@@ -4830,19 +5605,21 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             item_group_name = QtWidgets.QTableWidgetItem(group_name)
             item_chart_name = QtWidgets.QTableWidgetItem(chart_name)
             item_ooc_cnt = QtWidgets.QTableWidgetItem(str(ooc_cnt))
+            item_oos_cnt = QtWidgets.QTableWidgetItem(str(oos_cnt))
             item_we_rules = QtWidgets.QTableWidgetItem(str(we_rules) if we_rules is not None else 'N/A')
             item_oob_rules = QtWidgets.QTableWidgetItem(str(oob_rules) if oob_rules is not None else 'N/A')
 
             # 將所有欄位內容都置中顯示
-            for item in [item_group_name, item_chart_name, item_ooc_cnt, item_we_rules, item_oob_rules]:
+            for item in [item_group_name, item_chart_name, item_ooc_cnt, item_oos_cnt, item_we_rules, item_oob_rules]:
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
             # 將項目設定到正確的欄位
             self.violation_table.setItem(row_index, 0, item_group_name)
             self.violation_table.setItem(row_index, 1, item_chart_name)
             self.violation_table.setItem(row_index, 2, item_ooc_cnt)
-            self.violation_table.setItem(row_index, 3, item_we_rules)
-            self.violation_table.setItem(row_index, 4, item_oob_rules)
+            self.violation_table.setItem(row_index, 3, item_oos_cnt)
+            self.violation_table.setItem(row_index, 4, item_we_rules)
+            self.violation_table.setItem(row_index, 5, item_oob_rules)
 
             if has_ooc:
                 row_color = QtGui.QColor("#fff1f2")
@@ -4853,12 +5630,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             else:
                 row_color = QtGui.QColor("#ffffff")
 
-            for item in [item_group_name, item_chart_name, item_ooc_cnt, item_we_rules, item_oob_rules]:
+            for item in [item_group_name, item_chart_name, item_ooc_cnt, item_oos_cnt, item_we_rules, item_oob_rules]:
                 item.setBackground(QtGui.QBrush(row_color))
 
         self.violation_table.resizeColumnsToContents()
-        self.violation_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.violation_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.violation_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.violation_table.setSortingEnabled(True)
+        self.filter_violation_table()
 
         print("Summary Dashboard updated.")
 
@@ -4868,6 +5647,23 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         button.setFont(get_app_font(14))
         button.clicked.connect(self.process_charts)
         return button
+
+    def open_oob_results(self):
+        result_path = resource_path("result_with_images.xlsx")
+        if not os.path.isfile(result_path):
+            QtWidgets.QMessageBox.warning(
+                self, tr("warning", "Warning"), tr("no_results_to_open", "目前沒有可開啟的結果，請先執行分析。")
+            )
+            return
+        try:
+            os.startfile(result_path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, tr("error", "Error"), str(exc))
+
+    def request_oob_cancel(self):
+        self._cancel_requested = True
+        self.cancel_process_button.setEnabled(False)
+        self.progress_bar.setFormat(tr("cancelling", "正在停止，請稍候..."))
 
     def create_progress_bar(self):
         progress_bar = QtWidgets.QProgressBar(self)
@@ -4937,7 +5733,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             QtWidgets.QApplication.processEvents()
 
     def process_charts(self):
+        self._cancel_requested = False
+        self.start_button.setEnabled(False)
+        self.start_button.setText(tr("processing", "處理中..."))
+        self.cancel_process_button.setEnabled(True)
         self.results = []
+        self.by_tool_median_shift_cache = {}
         total_charts_count = 0
         skipped_charts_count = 0
         processed_charts_count = 0
@@ -4963,6 +5764,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             print("=== Building raw CSV file index ===")
             self.raw_file_index = build_raw_file_index(self.raw_data_directory)
             self.chart_types_cache = {}
+            self.by_tool_median_shift_cache = {}
             
             # 清空 CSV 快取（如果之前有的話）
             self.csv_cache.clear()
@@ -4995,6 +5797,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 print(f" - 自定義時間範圍: {custom_weekly_start} to {custom_weekly_end}")
 
             for i, (_, chart_info) in enumerate(all_charts_info.iterrows()):
+                if self._cancel_requested:
+                    break
                 group_name = str(chart_info['GroupName'])
                 chart_name = str(chart_info['ChartName'])
                 chart_key = f"{group_name}_{chart_name}"
@@ -5092,6 +5896,15 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     force=(i == total_charts_count - 1)
                 )
 
+            if self._cancel_requested:
+                self.update_summary_dashboard(total_charts_count, processed_charts_count, skipped_charts_count)
+                self.progress_bar.setFormat(tr("analysis_cancelled", "分析已取消"))
+                QtWidgets.QMessageBox.information(
+                    self, tr("analysis_cancelled", "分析已取消"),
+                    tr("partial_results_not_saved", "已停止後續處理；本次未儲存部分結果。")
+                )
+                return
+
             self.progress_bar.setValue(max(self.progress_bar.value(), 85))
             self.progress_bar.setFormat("85% - Saving results...")
             self.pump_ui_status("85% - Updating summary dashboard...", self.progress_bar.value(), force=True)
@@ -5101,9 +5914,19 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             if self.results:
                 self.pump_ui_status("85% - Saving results...", 85, force=True)
                 self.save_results()
-                QtWidgets.QMessageBox.information(self, "Processing Complete", "Results have been saved to result_with_images.xlsx")
+                run_time = QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+                self.user_settings.setValue("history/last_oob_run", run_time)
+                self._refresh_home_status()
+                self.open_results_button.setEnabled(True)
+                QtWidgets.QMessageBox.information(
+                    self, tr("processing_complete_title", "Processing Complete"),
+                    tr("results_saved", "Results were saved to result_with_images.xlsx.")
+                )
             else:
-                QtWidgets.QMessageBox.information(self, "Processing Complete", "No charts were processed successfully to save.")
+                QtWidgets.QMessageBox.information(
+                    self, tr("processing_complete_title", "Processing Complete"),
+                    tr("no_charts_processed", "No charts were processed successfully.")
+                )
 
             self.progress_bar.setValue(100)
             self.progress_bar.setFormat(f"100% - {tr('complete')}!")
@@ -5122,6 +5945,22 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         except Exception as e:
             self.show_error("Processing Error", str(e))
             traceback.print_exc()
+        finally:
+            self.cancel_process_button.setEnabled(False)
+            self.start_button.setEnabled(True)
+            self.start_button.setText(f"▶ {tr('start_process')}")
+
+    def _add_oob_empty_state(self):
+        self.oob_empty_state = QtWidgets.QLabel(
+            "<div style='text-align:center;'>"
+            f"<h2>{tr('no_analysis_results', '尚未產生分析結果')}</h2>"
+            f"<p style='color:#64748B;font-weight:400;'>{tr('oob_empty_hint', '確認上方資料來源與設定後，按「開始分析」產生管制圖與摘要。')}</p>"
+            "</div>"
+        )
+        self.oob_empty_state.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.oob_empty_state.setWordWrap(True)
+        self.oob_empty_state.setMinimumHeight(300)
+        self.image_grid_layout.addWidget(self.oob_empty_state, 0, 0)
 
     # --- 新增清理 Grid Layout 的方法 (針對第一個分頁) ---
     def clear_image_grid(self):
@@ -5316,12 +6155,13 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             chart_info['data_type'] = data_type
             chart_info['by_tool_median_shift_k_threshold'] = self.oob_settings.get(
                 'by_tool_median_shift_k_threshold',
-                1.67
+                2
             )
             chart_info['run_by_tool_median_shift'] = self.oob_settings.get(
                 'run_by_tool_median_shift',
                 False
             )
+            chart_info['_by_tool_median_shift_cache'] = self.by_tool_median_shift_cache
 
             # === 根據數據類型分流處理 ===
             if data_type == 'discrete':
@@ -5393,6 +6233,17 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             # 更新結果
             result['violated_rules'] = violated_rules if violated_rules is not None else {}
             self.build_result(result, image_path, weekly_image_path)
+            for key in [
+                'by_tool_median_shift_display',
+                'by_tool_median_shift_max_tool',
+                'by_tool_median_shift_max_diff',
+                'by_tool_median_shift_max_k',
+                'by_tool_median_shift_tool_count',
+                'by_tool_median_shift_top_tools',
+                'by_tool_median_shift_top_count',
+                'by_tool_median_shift_all_tools_json',
+            ]:
+                chart_info[key] = result.get(key)
 
             # 儲存原始處理後的資料，供 UI 在需要時繪製額外圖表
             try:
@@ -5506,6 +6357,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             result = {
                 'data_cnt': weekly_data_dict['cnt'],
                 'ooc_cnt': 0,
+                'oos_cnt': 0,
                 'WE_Rule': '',
                 'OOB_Rule': '',
                 'Material_no': chart_info.get('material_no', 'N/A'),
@@ -5524,10 +6376,16 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 'data_type': 'discrete'
             }
 
+            weekly_df = pd.DataFrame({'point_val': weekly_data['point_val']})
+            oos_results = oos_calculator(
+                weekly_df, chart_info.get('USL'), chart_info.get('LSL'),
+                chart_info.get('Characteristics', 'Nominal')
+            )
+            result['oos_cnt'] = oos_results[1]
+
             if not baseline_insufficient and not baseline_empty:
                 # === OOC 計算 ===
                 print(" - _process_discrete_chart: 計算 OOC...")
-                weekly_df = pd.DataFrame({'point_val': weekly_data['point_val']})
                 ooc_results = ooc_calculator(weekly_df, chart_info.get('UCL'), chart_info.get('LCL'))
                 ooc_highlight = review_ooc_results(ooc_results[1], ooc_results[2])
                 three_o7d_highlight = review_3o7d_results(ooc_results[1])
@@ -5566,8 +6424,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'HL_sticking_shift': discrete_oob_result.get('HL_sticking_shift', 'NO_HIGHLIGHT'),
                     'HL_trending': discrete_oob_result.get('HL_trending', 'NO_HIGHLIGHT'),
                     'HL_high_OOC': ooc_highlight,
+                    'HL_OOS': 'HIGHLIGHT' if oos_results[1] > 0 else 'NO_HIGHLIGHT',
                     'HL_3O7D': three_o7d_highlight,
-                    'HL_by_tool_median_shift': by_tool_median_results.get('HL_by_tool_median_shift', 'NO_HIGHLIGHT'),
+                    'HL_by_tool_shift': by_tool_median_results.get(
+                        'HL_by_tool_shift',
+                        by_tool_median_results.get('HL_by_tool_median_shift', 'NO_HIGHLIGHT')
+                    ),
                     'HL_category_LT_shift': discrete_oob_result.get('HL_category_LT_shift', 'NO_HIGHLIGHT'),
                     'HL_record_high_low': record_results.get('highlight_status', 'NO_HIGHLIGHT'),
                     'record_high': record_results.get('record_high', False),
@@ -5578,7 +6440,6 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'record_high_low_risk': record_results.get('record_high_low_risk', 'NONE'),
                     'record_high_low_display': record_results.get('record_high_low_display', 'None (High=0, Low=0, Total=0)'),
                     'by_tool_median_shift_display': by_tool_median_results.get('by_tool_median_shift_display', 'N/A'),
-                    'by_tool_median_shift_golden_tool': by_tool_median_results.get('by_tool_median_shift_golden_tool', 'N/A'),
                     'by_tool_median_shift_max_tool': by_tool_median_results.get('by_tool_median_shift_max_tool', 'N/A'),
                     'by_tool_median_shift_max_diff': by_tool_median_results.get('by_tool_median_shift_max_diff', np.nan),
                     'by_tool_median_shift_max_k': by_tool_median_results.get('by_tool_median_shift_max_k', np.nan),
@@ -5599,8 +6460,9 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'HL_sticking_shift': 'NO_HIGHLIGHT',
                     'HL_trending': 'NO_HIGHLIGHT',
                     'HL_high_OOC': 'NO_HIGHLIGHT',
+                    'HL_OOS': 'HIGHLIGHT' if result.get('oos_cnt', 0) > 0 else 'NO_HIGHLIGHT',
                     'HL_3O7D': 'NO_HIGHLIGHT',
-                    'HL_by_tool_median_shift': 'NO_HIGHLIGHT',
+                    'HL_by_tool_shift': 'NO_HIGHLIGHT',
                     'HL_category_LT_shift': 'NO_HIGHLIGHT',
                     'HL_record_high_low': 'NO_HIGHLIGHT',
                     'record_high': False,
@@ -5611,7 +6473,6 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'record_high_low_risk': 'NONE',
                     'record_high_low_display': 'None (High=0, Low=0, Total=0)',
                     'by_tool_median_shift_display': 'No valid baseline',
-                    'by_tool_median_shift_golden_tool': 'N/A',
                     'by_tool_median_shift_max_tool': 'N/A',
                     'by_tool_median_shift_max_diff': np.nan,
                     'by_tool_median_shift_max_k': np.nan,
@@ -5641,7 +6502,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         result['OOB_Rule'] = ', '.join(oob_true_keys) if oob_true_keys else 'N/A'
 
         for key in OOB_KEYS:
-            if key not in ['HL_record_high_low', 'HL_by_tool_median_shift']:
+            if key not in ['HL_record_high_low', 'HL_by_tool_shift']:
                 result.pop(key, None)
         result.pop('violated_rules', None) # 移除原始的 violated_rules 字典
 
@@ -5688,24 +6549,22 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         chart_name = result.get('chart_name', chart_info.get('chart_name', 'NA'))
 
         chart_path = result.get('chart_path')
-        if not chart_path or chart_path == 'N/A' or not os.path.exists(str(chart_path)):
-            spc_canvas = result.get('spc_canvas')
-            if spc_canvas is not None:
-                chart_path = make_output_image_path('SPC', group_name, chart_name)
-                save_canvas_figure(spc_canvas, chart_path)
-            else:
-                chart_path, _ = plot_spc_chart(raw_df, chart_info, ws, we)
-            result['chart_path'] = chart_path
+        spc_canvas = result.get('spc_canvas')
+        if spc_canvas is not None:
+            chart_path = make_output_image_path('SPC', group_name, chart_name)
+            save_canvas_figure_for_excel(spc_canvas, chart_path, figure_size=(10, 4.5))
+        elif not chart_path or chart_path == 'N/A' or not os.path.exists(str(chart_path)):
+            chart_path, _ = plot_spc_chart(raw_df, chart_info, ws, we)
+        result['chart_path'] = chart_path
 
         weekly_chart_path = result.get('weekly_chart_path')
-        if not weekly_chart_path or weekly_chart_path == 'N/A' or not os.path.exists(str(weekly_chart_path)):
-            weekly_canvas = result.get('weekly_canvas')
-            if weekly_canvas is not None:
-                weekly_chart_path = make_output_image_path('Weekly_SPC', group_name, chart_name)
-                save_canvas_figure(weekly_canvas, weekly_chart_path)
-            else:
-                weekly_chart_path = plot_weekly_spc_chart(raw_df, chart_info, ws, we)
-            result['weekly_chart_path'] = weekly_chart_path
+        weekly_canvas = result.get('weekly_canvas')
+        if weekly_canvas is not None:
+            weekly_chart_path = make_output_image_path('Weekly_SPC', group_name, chart_name)
+            save_canvas_figure_for_excel(weekly_canvas, weekly_chart_path, figure_size=(10, 4.5))
+        elif not weekly_chart_path or weekly_chart_path == 'N/A' or not os.path.exists(str(weekly_chart_path)):
+            weekly_chart_path = plot_weekly_spc_chart(raw_df, chart_info, ws, we)
+        result['weekly_chart_path'] = weekly_chart_path
 
     def save_results(self):
         # 產生 By Tool 圖表圖片供 Excel 使用
@@ -5731,18 +6590,24 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 color_path = os.path.join(by_tool_dir, f"{safe_name}_bytool_color.png")
                 group_path = os.path.join(by_tool_dir, f"{safe_name}_bytool_group.png")
 
-                color_canvas = result.get('by_tool_color_canvas')
-                if color_canvas is None:
-                    self.pump_ui_status(f"85% - Generating by-tool color chart {idx + 1}/{total_results}", force=False)
-                    color_canvas = plot_spc_by_tool_color(raw_df, chart_info, ws, we, oob_info=oob_info)
-                color_canvas.figure.savefig(color_path, dpi=120, bbox_inches='tight')
+                # Excel uses a taller export-only canvas. The GUI keeps its compact
+                # wide canvas, while the workbook gets a readable chart aspect ratio.
+                self.pump_ui_status(f"85% - Generating by-tool color chart {idx + 1}/{total_results}", force=False)
+                color_canvas = plot_spc_by_tool_color(
+                    raw_df, chart_info, ws, we,
+                    oob_info=oob_info,
+                    figure_size=(11, 4.2)
+                )
+                color_canvas.figure.savefig(color_path, dpi=140, bbox_inches='tight')
                 result['by_tool_color_path'] = color_path
 
-                group_canvas = result.get('by_tool_group_canvas')
-                if group_canvas is None:
-                    self.pump_ui_status(f"85% - Generating by-tool group chart {idx + 1}/{total_results}", force=False)
-                    group_canvas = plot_spc_by_tool_group(raw_df, chart_info, ws, we, oob_info=oob_info)
-                group_canvas.figure.savefig(group_path, dpi=120, bbox_inches='tight')
+                self.pump_ui_status(f"85% - Generating by-tool group chart {idx + 1}/{total_results}", force=False)
+                group_canvas = plot_spc_by_tool_group(
+                    raw_df, chart_info, ws, we,
+                    oob_info=oob_info,
+                    figure_size=(11, 4.2)
+                )
+                group_canvas.figure.savefig(group_path, dpi=140, bbox_inches='tight')
                 result['by_tool_group_path'] = group_path
             except Exception as e:
                 print(f"[Warning] Failed to save By Tool charts: {e}")
@@ -5758,11 +6623,11 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         results_df = pd.DataFrame(self.results)
 
         # 確保所有預期的列都存在，包括新增的數據類型欄位
-        expected_cols = ['data_cnt', 'ooc_cnt', 'WE_Rule', 'OOB_Rule', 'data_type', 'Material_no',
+        expected_cols = ['data_cnt', 'ooc_cnt', 'oos_cnt', 'WE_Rule', 'OOB_Rule', 'data_type', 'Material_no',
                          'group_name', 'chart_name', 'chart_ID', 'Characteristics',
                          'USL', 'LSL', 'UCL', 'LCL', 'Target', 'Cpk', 'Resolution',
-                         'HL_by_tool_median_shift', 'by_tool_median_shift_display',
-                         'by_tool_median_shift_golden_tool', 'by_tool_median_shift_max_tool',
+                         'HL_by_tool_shift', 'by_tool_median_shift_display',
+                         'by_tool_median_shift_max_tool',
                          'by_tool_median_shift_max_diff', 'by_tool_median_shift_max_k',
                          'by_tool_median_shift_tool_count', 'by_tool_median_shift_top_tools',
                          'by_tool_median_shift_top_count', 'by_tool_median_shift_all_tools_json',
@@ -5783,7 +6648,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
              if hasattr(self, 'progress_bar'):
                  self.progress_bar.setValue(max(self.progress_bar.value(), 96))
                  self.pump_ui_status("96% - Writing Excel...", self.progress_bar.value(), force=True)
-             save_results_to_excel(results_df)
+             save_results_to_excel(
+                 results_df,
+                 output_path=resource_path('result_with_images.xlsx')
+             )
              if hasattr(self, 'progress_bar'):
                  self.progress_bar.setValue(max(self.progress_bar.value(), 98))
                  self.pump_ui_status("98% - Excel saved", self.progress_bar.value(), force=True)
@@ -6110,7 +6978,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                         </thead>
                         <tbody>
                             {''.join(self.create_table_row(key, result) for key in [
-                                'data_cnt', 'ooc_cnt', 'WE_Rule', 'OOB_Rule', 'Material_no',
+                                'data_cnt', 'ooc_cnt', 'oos_cnt', 'WE_Rule', 'OOB_Rule', 'Material_no',
                                 'group_name', 'chart_name', 'Cpk', 'by_tool_median_shift_summary',
                                 'record_high_low_summary'
                             ])}
@@ -6151,11 +7019,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             display_name_map = {
                 'data_cnt': 'Data Count',
                 'ooc_cnt': 'OOC Count',
+                'oos_cnt': 'OOS Count',
                 'WE_Rule': 'WE Rule',
                 'OOB_Rule': 'OOB Rule',
                 'group_name': 'Group Name',
                 'chart_name': 'Chart Name',
-                'by_tool_median_shift_summary': 'By Tool Median Shift',
+                'by_tool_median_shift_summary': 'By Tool P05/P50/P95 Shift',
                 'record_high_low_summary': 'Record High/Low',
             }
 
@@ -6972,7 +7841,6 @@ class SplitDataPreviewWidget(SplitDataWidget):
         self.preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.preview_table.horizontalHeader().setStretchLastSection(True)
         preview_layout.addWidget(self.preview_table)
-        main_layout.addWidget(self.preview_group_box, 4, 0, 1, 2)
 
         self.validation_group_box = QtWidgets.QGroupBox(tr("validation_summary", "Validation Summary"))
         validation_layout = QtWidgets.QVBoxLayout(self.validation_group_box)
@@ -7020,8 +7888,18 @@ class SplitDataPreviewWidget(SplitDataWidget):
         self.validation_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.validation_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.validation_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.validation_table.cellDoubleClicked.connect(self._jump_to_validation_issue)
+        self.validation_table.setToolTip(
+            tr("validation_jump_hint", "雙擊問題列可定位到預覽資料中的問題位置")
+        )
         validation_layout.addWidget(self.validation_table)
-        main_layout.addWidget(self.validation_group_box, 5, 0, 1, 2)
+        self.preview_tabs = QtWidgets.QTabWidget()
+        self.preview_group_box.setTitle("")
+        self.validation_group_box.setTitle("")
+        self.preview_tabs.addTab(self.preview_group_box, tr("preview_data", "資料預覽"))
+        self.preview_tabs.addTab(self.validation_group_box, tr("validation_summary", "驗證摘要"))
+        self.preview_tabs.setMinimumHeight(430)
+        main_layout.addWidget(self.preview_tabs, 4, 0, 1, 2)
 
         bottom_action_layout = QtWidgets.QHBoxLayout()
         bottom_action_layout.addStretch(1)
@@ -7031,8 +7909,13 @@ class SplitDataPreviewWidget(SplitDataWidget):
         self.process_button.setObjectName("processButton")
         self.process_button.setEnabled(False)
         bottom_action_layout.addWidget(self.process_button)
+        self.open_output_button = QtWidgets.QPushButton(tr("open_output_folder", "開啟輸出資料夾"))
+        self.open_output_button.setFixedHeight(52)
+        self.open_output_button.setEnabled(os.path.isdir(self._get_split_output_folder()))
+        self.open_output_button.clicked.connect(self._open_split_output_folder)
+        bottom_action_layout.addWidget(self.open_output_button)
         bottom_action_layout.addStretch(1)
-        main_layout.addLayout(bottom_action_layout, 6, 0, 1, 2)
+        main_layout.addLayout(bottom_action_layout, 5, 0, 1, 2)
 
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setTextVisible(True)
@@ -7042,9 +7925,9 @@ class SplitDataPreviewWidget(SplitDataWidget):
         self.status_label = QtWidgets.QLabel(tr('ready'))
         self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("color: #607D8B; font-style: italic;")
-        main_layout.addWidget(self.progress_bar, 7, 0, 1, 2)
-        main_layout.addWidget(self.status_label, 8, 0, 1, 2)
-        main_layout.setRowStretch(9, 1)
+        main_layout.addWidget(self.progress_bar, 6, 0, 1, 2)
+        main_layout.addWidget(self.status_label, 7, 0, 1, 2)
+        main_layout.setRowStretch(8, 1)
         self._refresh_validation_summary()
 
     def refresh_ui_texts(self):
@@ -7056,8 +7939,10 @@ class SplitDataPreviewWidget(SplitDataWidget):
         )
         self.input_group_box.setTitle(tr('select_input_files'))
         self.mode_group_box.setTitle(tr('select_processing_mode'))
-        self.preview_group_box.setTitle(tr("preview_validate_title", "3. Data Preview"))
-        self.validation_group_box.setTitle(tr("validation_summary", "Validation Summary"))
+        self.preview_group_box.setTitle("")
+        self.validation_group_box.setTitle("")
+        self.preview_tabs.setTabText(0, tr("preview_data", "資料預覽"))
+        self.preview_tabs.setTabText(1, tr("validation_summary", "驗證摘要"))
         self.input_path_entry.setPlaceholderText(tr('select_csv_files'))
         self.input_button.setText(tr('browse'))
         self.mode_label.setText(tr('select_file_type'))
@@ -7270,6 +8155,9 @@ class SplitDataPreviewWidget(SplitDataWidget):
             label.setText("-")
         self._refresh_validation_summary()
         self._refresh_action_state()
+        self.preview_tabs.setCurrentIndex(
+            1 if any(not result.is_ready or result.warning_count for result in self.preview_results) else 0
+        )
 
     def _refresh_action_state(self):
         ready = bool(self.preview_results) and self._validated_mode == self._current_processing_mode and all(result.is_ready for result in self.preview_results)
@@ -7498,6 +8386,9 @@ class SplitDataPreviewWidget(SplitDataWidget):
             self._display_preview_result(self.preview_results[0])
         self._refresh_validation_summary()
         self._refresh_action_state()
+        self.preview_tabs.setCurrentIndex(
+            1 if any(not result.is_ready or result.warning_count for result in self.preview_results) else 0
+        )
         if failed_files:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -7571,6 +8462,34 @@ class SplitDataPreviewWidget(SplitDataWidget):
                 item.setBackground(QtGui.QColor("#FEF2F2") if issue.severity == "error" else QtGui.QColor("#FFFBEB"))
                 self.validation_table.setItem(row_idx, col_idx, item)
 
+    def _jump_to_validation_issue(self, row, _column):
+        if not (0 <= row < self.validation_table.rowCount()):
+            return
+        combo_index = self.preview_file_combo.currentIndex()
+        if not (0 <= combo_index < len(self.preview_results)):
+            return
+        issue = self.preview_results[combo_index].issues[row]
+        if issue.preview_row is None:
+            return
+        preview_col = issue.preview_col if issue.preview_col is not None else 0
+        item = self.preview_table.item(issue.preview_row, preview_col)
+        if item is not None:
+            self.preview_tabs.setCurrentIndex(0)
+            self.preview_table.setCurrentItem(item)
+            self.preview_table.scrollToItem(item, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.preview_table.setFocus()
+
+    def _open_split_output_folder(self):
+        output_folder = self._get_split_output_folder()
+        try:
+            os.startfile(output_folder)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, tr("error", "Error"), str(exc))
+
+    def _get_split_output_folder(self):
+        main_window = self.window()
+        return getattr(main_window, "raw_data_directory", resource_path('input/raw_charts'))
+
     def run_processing(self):
         if not self.preview_results or self._validated_mode != self._current_processing_mode:
             QtWidgets.QMessageBox.warning(self, tr("warning", "Warning"), tr("reupload_to_preview", "Please re-upload files to generate preview data first."))
@@ -7578,7 +8497,7 @@ class SplitDataPreviewWidget(SplitDataWidget):
         if any(not result.is_ready for result in self.preview_results):
             QtWidgets.QMessageBox.warning(self, tr("warning", "Warning"), tr("cannot_process_until_fixed", "Cannot process until errors are fixed."))
             return
-        final_output_folder = resource_path('input/raw_charts')
+        final_output_folder = self._get_split_output_folder()
         try:
             os.makedirs(final_output_folder, exist_ok=True)
         except OSError as e:
@@ -7608,6 +8527,7 @@ class SplitDataPreviewWidget(SplitDataWidget):
                 failed_files.append(f"{os.path.basename(result.file_path)}: {e}")
         self.progress_bar.setVisible(False)
         if processed_count > 0 and not failed_files:
+            self.open_output_button.setEnabled(True)
             QtWidgets.QMessageBox.information(self, tr("complete", "Complete"), tr("all_files_processed", "Successfully processed all {count} files!").format(count=processed_count))
             self.status_label.setText(tr("all_files_processing_completed", "All files processing completed."))
         elif processed_count > 0:
