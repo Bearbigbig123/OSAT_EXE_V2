@@ -51,10 +51,58 @@ PLOT_STYLE = {
 
 DEBUG_OOB_CALC = False
 
+BASELINE_MIN_POINTS = 200
+BASELINE_MONTH_WINDOWS = (1, 3, 6)
+
 
 def oob_calc_print(*args, **kwargs):
     if DEBUG_OOB_CALC:
         print(*args, **kwargs)
+
+
+def select_baseline_window(raw_df, baseline_end_date,
+                           min_points=BASELINE_MIN_POINTS,
+                           month_windows=BASELINE_MONTH_WINDOWS):
+    """Select the shortest baseline window that contains enough data.
+
+    The one- and three-month windows require ``min_points`` rows. The final
+    six-month window is always used as the fallback, even when it contains
+    fewer rows, so charts with sparse data can still be analysed.
+    """
+    baseline_end_date = pd.to_datetime(baseline_end_date)
+
+    for index, months in enumerate(month_windows):
+        baseline_start_date = baseline_end_date - pd.DateOffset(months=months)
+        baseline_data = raw_df[
+            (raw_df['point_time'] >= baseline_start_date) &
+            (raw_df['point_time'] <= baseline_end_date)
+        ].copy()
+
+        is_fallback = index == len(month_windows) - 1
+        if len(baseline_data) >= min_points or is_fallback:
+            return baseline_start_date, baseline_data, months
+
+    raise ValueError("month_windows must contain at least one baseline window")
+
+
+def filter_analysis_display_window(raw_df, baseline_start_date, weekly_end_date):
+    """Limit charts to the selected baseline and the current weekly window."""
+    baseline_start_date = pd.to_datetime(baseline_start_date)
+    weekly_end_date = pd.to_datetime(weekly_end_date)
+    return raw_df[
+        (raw_df['point_time'] >= baseline_start_date) &
+        (raw_df['point_time'] <= weekly_end_date)
+    ].copy()
+
+
+def get_violation_filter_labels():
+    """Return anomaly-filter labels in the active UI language."""
+    return [
+        tr("all_anomalies", "所有異常"),
+        tr("filter_ooc", "OOC"),
+        tr("filter_we_rule", "WE 規則"),
+        tr("filter_oob_rule", "OOB 規則"),
+    ]
 
 
 def configure_external_right_legend(fig, ax, item_count, legend_fontsize):
@@ -2225,8 +2273,7 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
     print("--- 進入外部 process_single_chart 函數 ---")
     print(f"  接收到的 raw_df shape: {raw_df.shape}")
     print(f"  週數據範圍: {weekly_start_date} 至 {weekly_end_date}")
-    # 注意：這裡接收的是 initial_baseline_start_date (通常是往前一年)
-    print(f"  初始基線數據範圍 (往前一年): {initial_baseline_start_date} 至 {baseline_end_date}")
+    print(f"  可用基線數據範圍: {initial_baseline_start_date} 至 {baseline_end_date}")
 
     if raw_df is None or raw_df.empty:
         print("  raw_df 是空的或 None, 返回 None")
@@ -2241,41 +2288,16 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
              print(f'未找到週數據, GroupName: {chart_info.get("group_name", "N/A")}, ChartName: {chart_info.get("chart_name", "N/A")}, 返回 None')
              return None
 
-        # --- 基線數據範圍選擇邏輯開始 ---
+        # 依序嘗試 1、3、6 個月；1/3 個月滿 200 筆即採用，否則以 6 個月為 fallback。
+        actual_baseline_start_date, baseline_data, baseline_months = select_baseline_window(
+            raw_df, baseline_end_date
+        )
+        print(
+            f"  使用 {baseline_months} 個月 baseline：{len(baseline_data)} 點，"
+            f"範圍 {actual_baseline_start_date} 至 {baseline_end_date}"
+        )
 
-        # 步驟 1: 使用初始的一年基線範圍過濾數據並計數
-        print("  正在篩選初始一年基線數據...")
-        baseline_data_one_year = raw_df[(raw_df['point_time'] >= initial_baseline_start_date) & (raw_df['point_time'] <= baseline_end_date)].copy() # Use copy()
-        baseline_count_one_year = len(baseline_data_one_year)
-        print(f"  初始一年基線數據點數量: {baseline_count_one_year}")
-
-        # 步驟 2: 根據計數決定最終使用的基線開始日期
-        # === 新增：基線數據不足標記 ===
         baseline_insufficient = False
-        
-        if baseline_count_one_year < 10:
-            # 如果少於 10 點，將基線期擴展到兩年
-            actual_baseline_start_date = baseline_end_date - pd.Timedelta(days=365 * 2)
-            print(f"  基線數據點數量 ({baseline_count_one_year}) < 10，將基線期擴展至兩年: {actual_baseline_start_date} 至 {baseline_end_date}")
-                
-            # 檢查擴展後的數量
-            baseline_data_two_year = raw_df[(raw_df['point_time'] >= actual_baseline_start_date) & (raw_df['point_time'] <= baseline_end_date)].copy()
-            baseline_count_two_year = len(baseline_data_two_year)
-            print(f"  擴展至兩年後基線數據點數量: {baseline_count_two_year}")
-            
-            if baseline_count_two_year < 10:
-                print(f"  ⚠️  擴展至兩年後仍少於10點 ({baseline_count_two_year})，將跳過 OOB 分析但繼續處理其他功能")
-                baseline_insufficient = True
-            print(f"  基線數據點數量 ({baseline_count_one_year}) < 10，將基線期擴展至兩年: {actual_baseline_start_date} 至 {baseline_end_date}")
-        else:
-            # 如果大於等於 10 點，使用一年的基線期
-            actual_baseline_start_date = initial_baseline_start_date
-            print(f"  基線數據點數量 ({baseline_count_one_year}) >= 10，使用一年基線期: {actual_baseline_start_date} 至 {baseline_end_date}")
-
-        # 步驟 3: 使用最終確定的基線範圍過濾數據
-        print("  正在篩選最終基線數據...")
-        baseline_data = raw_df[(raw_df['point_time'] >= actual_baseline_start_date) & (raw_df['point_time'] <= baseline_end_date)].copy() # Use copy()
-        print(f"  篩選後 baseline_data shape (使用 {len(baseline_data)} 點從 {actual_baseline_start_date} 至 {baseline_end_date}): {baseline_data.shape}")
 
 
         # === 修改：基線為空時仍然繼續處理 ===
@@ -2453,9 +2475,11 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
             'Target': chart_info.get('Target', 'N/A'),
             'Resolution': chart_info.get('Resolution', 'N/A'),
             'baseline_insufficient': baseline_insufficient,  # 新增標記，供後續使用
-            'baseline_empty': baseline_empty  # 新增標記，記錄基線是否為空
-            # 可以考慮添加 actual_baseline_start_date 到結果中，用於記錄實際使用的基線範圍
-            # 'Actual_Baseline_Start': actual_baseline_start_date
+            'baseline_empty': baseline_empty,  # 新增標記，記錄基線是否為空
+            'baseline_months': baseline_months,
+            'baseline_data_count': len(baseline_data),
+            'baseline_start_date': actual_baseline_start_date,
+            'baseline_end_date': baseline_end_date
         }
         print("--- 外部 process_single_chart 函數成功退出 ---")
         return result
@@ -3279,6 +3303,27 @@ def plot_spc_by_tool_group(
         subset = df[df['Matching'] == tool]
         tool_info = tool_shift_info.get(str(tool), {})
         tool_k = pd.to_numeric(pd.Series([tool_info.get('k')]), errors='coerce').iloc[0]
+        show_shift_marker = (
+            pd.notna(tool_k)
+            and np.isfinite(tool_k)
+            and float(tool_k) > 2.0
+        )
+        is_shift_tool = tool_info.get('highlight', False)
+        if isinstance(is_shift_tool, str):
+            is_shift_tool = is_shift_tool.strip().lower() in {'true', '1', 'yes', 'highlight'}
+        else:
+            is_shift_tool = bool(is_shift_tool)
+
+        # Keep normal tools visually quiet.  Only tools that triggered the
+        # by-tool shift rule receive a light-yellow group background.
+        if is_shift_tool and not subset.empty:
+            ax.axvspan(
+                subset.index.min() - 0.5,
+                subset.index.max() + 0.5,
+                color='#FFF4CC',
+                alpha=0.75,
+                zorder=0,
+            )
         max_percentile = str(tool_info.get('max_percentile', '')).upper()
         triggered_rules = [
             str(rule).replace('_shift', '').upper()
@@ -3287,7 +3332,9 @@ def plot_spc_by_tool_group(
         ]
         percentile_rank = {'P05': 0, 'P50': 1, 'P95': 2}
         triggered_rules.sort(key=lambda name: percentile_rank.get(name, 99))
-        if pd.notna(tool_k) and np.isfinite(tool_k):
+        # Show K details only when the maximum K actually exceeds the shift
+        # threshold.  Labels for normal tools remain just the tool name.
+        if show_shift_marker:
             if len(triggered_rules) == 1:
                 triggered_percentile = triggered_rules[0]
                 triggered_k = pd.to_numeric(
@@ -3927,8 +3974,21 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         default_raw_path = resource_path('input/raw_charts/')
         saved_excel_path = self.user_settings.value("workspace/excel_path", default_excel_path, type=str)
         saved_raw_path = self.user_settings.value("workspace/raw_data_directory", default_raw_path, type=str)
-        self.filepath = saved_excel_path if os.path.isfile(saved_excel_path) else default_excel_path
-        self.raw_data_directory = saved_raw_path if os.path.isdir(saved_raw_path) else default_raw_path
+        if getattr(sys, 'frozen', False):
+            # 打包版優先使用 EXE 同層的外部 input；不存在才沿用使用者上次選擇。
+            self.filepath = (
+                default_excel_path if os.path.isfile(default_excel_path)
+                else saved_excel_path if os.path.isfile(saved_excel_path)
+                else default_excel_path
+            )
+            self.raw_data_directory = (
+                default_raw_path if os.path.isdir(default_raw_path)
+                else saved_raw_path if os.path.isdir(saved_raw_path)
+                else default_raw_path
+            )
+        else:
+            self.filepath = saved_excel_path if os.path.isfile(saved_excel_path) else default_excel_path
+            self.raw_data_directory = saved_raw_path if os.path.isdir(saved_raw_path) else default_raw_path
         self.image_path = resource_path('image.png')
         self.results = []
         self.selected_analysis_chart_rows = None
@@ -4788,6 +4848,17 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         if hasattr(self, 'summary_title_label'):
             self.summary_title_label.setText(f"<b>{tr('summary_dashboard')}</b><br><span style='font-size:12px; color:#64748B; font-weight:400;'>OOB / SPC health overview</span>")
             self.violation_table_label.setText(f"<b>{tr('charts_with_anomalies_details')}</b>")
+            self.violation_search_input.setPlaceholderText(
+                tr("search_group_chart", "搜尋 Group 或 Chart")
+            )
+            if hasattr(self, 'violation_type_combo'):
+                selected_filter = self.violation_type_combo.currentIndex()
+                self.violation_type_combo.blockSignals(True)
+                self.violation_type_combo.clear()
+                self.violation_type_combo.addItems(get_violation_filter_labels())
+                self.violation_type_combo.setCurrentIndex(max(0, selected_filter))
+                self.violation_type_combo.blockSignals(False)
+                self.filter_violation_table()
             # 更新表頭
             headers = [tr('group_name'), tr('chart_name'), tr('ooc_count'), tr('oos_count', 'OOS Count'), tr('we_rules'), tr('oob_rules')]
             self.violation_table.setHorizontalHeaderLabels(headers)
@@ -5145,9 +5216,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         self.violation_search_input.setClearButtonEnabled(True)
         self.violation_search_input.textChanged.connect(self.filter_violation_table)
         self.violation_type_combo = QtWidgets.QComboBox()
-        self.violation_type_combo.addItems([
-            tr("all_anomalies", "所有異常"), "OOC", "WE Rule", "OOB Rule"
-        ])
+        self.violation_type_combo.addItems(get_violation_filter_labels())
         self.violation_type_combo.currentIndexChanged.connect(self.filter_violation_table)
         violation_toolbar.addWidget(self.violation_search_input, 1)
         violation_toolbar.addWidget(self.violation_type_combo)
@@ -6132,15 +6201,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
             weekly_start_date = weekly_end_date - pd.Timedelta(days=6)
 
-        # baseline 邏輯保持不變：以週期開始時間的前一秒作為基線結束
+        # baseline 以當週開始前一秒為結束點，最多往前取六個月。
         baseline_end_date = weekly_start_date - pd.Timedelta(seconds=1)
-        # 這裡使用初始的一年基線範圍
-        initial_baseline_start_date = baseline_end_date - pd.Timedelta(days=365)
+        initial_baseline_start_date = baseline_end_date - pd.DateOffset(months=6)
 
         print(f" - analyze_chart: 計算出的時間範圍")
         print(f"   Weekly 週期: {weekly_start_date} to {weekly_end_date}")
-        print(f"   Initial Baseline 基線: {initial_baseline_start_date} to {baseline_end_date}")
-        print(f"   Baseline 時間長度: {(baseline_end_date - initial_baseline_start_date).days} 天")
+        print(f"   Maximum Baseline 基線: {initial_baseline_start_date} to {baseline_end_date}")
+        print("   Baseline 選擇規則: 1 個月 >= 200 點，否則 3 個月 >= 200 點，最後使用 6 個月")
 
         try:
             # === 提前進行數據類型判斷 ===
@@ -6195,6 +6263,18 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
             oob_true_keys = [k for k in OOB_SUMMARY_KEYS if result.get(k) == 'HIGHLIGHT']
             oob_summary = ', '.join(oob_true_keys) if oob_true_keys else 'N/A'
+
+            # 圖表與 OOB 計算使用相同 baseline；Weekly 圖會再篩選成當週資料。
+            chart_raw_df = filter_analysis_display_window(
+                raw_df,
+                result.get('baseline_start_date', initial_baseline_start_date),
+                weekly_end_date
+            )
+            print(
+                f" - analyze_chart: 圖表時間範圍 "
+                f"{chart_raw_df['point_time'].min()} to {chart_raw_df['point_time'].max()} "
+                f"({len(chart_raw_df)} 點)"
+            )
             
             image_path = 'N/A'
             weekly_image_path = 'N/A'
@@ -6202,11 +6282,11 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
             if use_interactive_charts and render_charts:
                 # 生成互動式 SPC 圖表（返回 FigureCanvas）
-                spc_canvas, violated_rules = plot_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end_date, record_results=record_results, use_batch_id_labels=use_batch_id_labels, oob_info=oob_summary)
+                spc_canvas, violated_rules = plot_spc_chart_interactive(chart_raw_df, chart_info, weekly_start_date, weekly_end_date, record_results=record_results, use_batch_id_labels=use_batch_id_labels, oob_info=oob_summary)
                 print(f" - analyze_chart: plot_spc_chart_interactive 完成")
 
                 # 生成互動式週圖表（返回 FigureCanvas）
-                weekly_canvas = plot_weekly_spc_chart_interactive(raw_df, chart_info, weekly_start_date, weekly_end_date, record_results=record_results, use_batch_id_labels=use_batch_id_labels, oob_info=oob_summary)
+                weekly_canvas = plot_weekly_spc_chart_interactive(chart_raw_df, chart_info, weekly_start_date, weekly_end_date, record_results=record_results, use_batch_id_labels=use_batch_id_labels, oob_info=oob_summary)
                 print(f" - analyze_chart: plot_weekly_spc_chart_interactive 完成")
                 
                 # 儲存 canvas 供 UI 使用
@@ -6214,14 +6294,14 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 result['weekly_canvas'] = weekly_canvas
             elif render_charts:
                 # 生成靜態 SPC 圖表
-                image_path, violated_rules = plot_spc_chart(raw_df, chart_info, weekly_start_date, weekly_end_date)
+                image_path, violated_rules = plot_spc_chart(chart_raw_df, chart_info, weekly_start_date, weekly_end_date)
                 print(f" - analyze_chart: plot_spc_chart 完成，image_path: {image_path}")
 
                 # 生成靜態週圖表
-                weekly_image_path = plot_weekly_spc_chart(raw_df, chart_info, weekly_start_date, weekly_end_date)
+                weekly_image_path = plot_weekly_spc_chart(chart_raw_df, chart_info, weekly_start_date, weekly_end_date)
                 print(f" - analyze_chart: plot_weekly_spc_chart 完成，weekly_image_path: {weekly_image_path}")
             else:
-                violated_rules = compute_violated_rules(raw_df, chart_info, weekly_start_date, weekly_end_date)
+                violated_rules = compute_violated_rules(chart_raw_df, chart_info, weekly_start_date, weekly_end_date)
                 print(" - analyze_chart: skipped chart rendering; computed violated rules only")
 
             # Cpk 計算
@@ -6248,27 +6328,27 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             # 儲存原始處理後的資料，供 UI 在需要時繪製額外圖表
             try:
                 # 確保 'Matching' 一定存在於儲存的 raw_df 中
-                if 'Matching' not in raw_df.columns:
+                if 'Matching' not in chart_raw_df.columns:
                     try:
                         print("[DEBUG analyze_chart] 'Matching' 欄位在 processed data 中缺失，將自動填入 'Unknown'")
-                        temp_df = raw_df.copy()
+                        temp_df = chart_raw_df.copy()
                         temp_df['Matching'] = 'Unknown'
                         result['raw_df'] = temp_df
                     except Exception:
                         print("[Warning analyze_chart] 無法複製 processed raw_df，直接使用引用")
-                        raw_df['Matching'] = 'Unknown'
-                        result['raw_df'] = raw_df
+                        chart_raw_df['Matching'] = 'Unknown'
+                        result['raw_df'] = chart_raw_df
                 else:
-                    result['raw_df'] = raw_df.copy()
+                    result['raw_df'] = chart_raw_df.copy()
 
                 result['weekly_start_date'] = weekly_start_date
                 result['weekly_end_date'] = weekly_end_date
                 result['chart_info'] = chart_info.copy()
             except Exception:
                 # 如果複製失敗，仍保留原始 reference（保險起見）
-                if 'ByTool' not in raw_df.columns:
-                    raw_df['ByTool'] = 'Unknown'
-                result['raw_df'] = raw_df
+                if 'ByTool' not in chart_raw_df.columns:
+                    chart_raw_df['ByTool'] = 'Unknown'
+                result['raw_df'] = chart_raw_df
                 result['weekly_start_date'] = weekly_start_date
                 result['weekly_end_date'] = weekly_end_date
                 result['chart_info'] = chart_info
@@ -6294,29 +6374,15 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
         
         try:
             # === 基線範圍選擇邏輯 ===
-            baseline_data_one_year = raw_df[(raw_df['point_time'] >= initial_baseline_start_date) & 
-                                          (raw_df['point_time'] <= baseline_end_date)].copy()
-            baseline_count_one_year = len(baseline_data_one_year)
-            print(f" - _process_discrete_chart: 初始一年基線數據點數量: {baseline_count_one_year}")
-
+            actual_baseline_start_date, baseline_data, baseline_months = select_baseline_window(
+                raw_df, baseline_end_date
+            )
+            print(
+                f" - _process_discrete_chart: 使用 {baseline_months} 個月 baseline，"
+                f"共 {len(baseline_data)} 點"
+            )
             baseline_insufficient = False
-            if baseline_count_one_year < 10:
-                actual_baseline_start_date = baseline_end_date - pd.Timedelta(days=365 * 2)
-                print(f" - _process_discrete_chart: 基線數據不足，擴展至兩年: {actual_baseline_start_date}")
-                
-                baseline_data_two_year = raw_df[(raw_df['point_time'] >= actual_baseline_start_date) & 
-                                              (raw_df['point_time'] <= baseline_end_date)].copy()
-                baseline_count_two_year = len(baseline_data_two_year)
-                
-                if baseline_count_two_year < 10:
-                    print(f" - _process_discrete_chart: 擴展至兩年後仍少於10點，標記為基線不足")
-                    baseline_insufficient = True
-            else:
-                actual_baseline_start_date = initial_baseline_start_date
 
-            # 篩選最終數據
-            baseline_data = raw_df[(raw_df['point_time'] >= actual_baseline_start_date) & 
-                                 (raw_df['point_time'] <= baseline_end_date)].copy()
             weekly_data = raw_df[(raw_df['point_time'] >= weekly_start_date) & 
                                (raw_df['point_time'] <= weekly_end_date)].copy()
 
@@ -6373,6 +6439,10 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 'Resolution': chart_info.get('Resolution', 'N/A'),
                 'baseline_insufficient': baseline_insufficient,
                 'baseline_empty': baseline_empty,  # 新增標記
+                'baseline_months': baseline_months,
+                'baseline_data_count': len(baseline_data),
+                'baseline_start_date': actual_baseline_start_date,
+                'baseline_end_date': baseline_end_date,
                 'data_type': 'discrete'
             }
 
