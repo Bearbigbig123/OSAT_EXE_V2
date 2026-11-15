@@ -15,6 +15,7 @@ from CL_limit_class import CLTightenCalculator
 # Translation System
 from translations import TranslationManager, get_translator, tr
 from analysis_selection import filter_chart_info_for_analysis, get_selected_analysis_rows, warn_if_no_analysis_selection
+from by_tool_oob_analysis import evaluate_by_tool_new_rules
 # Excel 和圖片處理
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
@@ -289,6 +290,7 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         k_threshold_layout.addWidget(self.by_tool_median_shift_k_combo)
         k_threshold_layout.addStretch()
         tool_layout.addLayout(k_threshold_layout)
+
         tool_layout.addStretch()
         
         top_settings_layout.addWidget(self.display_group, 1)
@@ -2057,6 +2059,7 @@ def default_by_tool_median_shift_result(reason='N/A'):
         'by_tool_median_shift_tool_count': 0,
         'by_tool_median_shift_top_tools': 'N/A',
         'by_tool_median_shift_top_count': 0,
+        'by_tool_eligible_count': 0,
         'by_tool_median_shift_all_tools_json': '[]',
     }
 
@@ -2093,152 +2096,83 @@ def _build_by_tool_median_shift_cache_key(chart_info, baseline_data, eligible_to
     )
 
 
-def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_info, min_points=3):
+def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_info, min_points=None):
+    """Evaluate only the current production By-Tool OOB rule.
+
+    ``HL_by_tool_shift`` is the v2 result. Weekly 1-4 borrows the latest Tool
+    Baseline points until it reaches 5; at least 10 Baseline points must remain
+    after borrowing. The Whole Baseline exemption is then applied.
+    ``min_points`` is retained only for call compatibility; the approved
+    rolling and remaining-Baseline limits are fixed.
+    """
     result = default_by_tool_median_shift_result('N/A')
     try:
         if chart_info is None:
             chart_info = {}
-        # Tool OOB intentionally uses the same P05/P50/P95 K-shift method as
-        # the whole chart, but its alert threshold is fixed at K > 2.
-        k_threshold = 2.0
         if weekly_data is None or weekly_data.empty:
             return default_by_tool_median_shift_result('No weekly data')
         if baseline_data is None or baseline_data.empty:
             return default_by_tool_median_shift_result('No baseline data')
         if 'Matching' not in weekly_data.columns or 'Matching' not in baseline_data.columns:
             return default_by_tool_median_shift_result('No Matching column')
-
-        weekly = weekly_data.copy()
-        weekly['point_val'] = pd.to_numeric(weekly['point_val'], errors='coerce')
-        weekly['Matching'] = weekly['Matching'].fillna('Unknown').astype(str)
-        weekly = weekly.dropna(subset=['point_val'])
-        if weekly.empty:
-            return default_by_tool_median_shift_result('No valid weekly values')
-
-        weekly_stats = (
-            weekly.groupby('Matching')['point_val']
-            .agg(weekly_median='median', weekly_count='count')
-            .reset_index()
+        detail = evaluate_by_tool_new_rules(
+            baseline_data, weekly_data, chart_info, kshift_sigma_ratio_calculator
         )
-        weekly_stats = weekly_stats[weekly_stats['weekly_count'] >= min_points].copy()
-        if weekly_stats.empty:
-            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
+        if detail.empty:
+            return default_by_tool_median_shift_result('No valid By Tool data')
 
-        eligible_tools = set(weekly_stats['Matching'])
-
-        baseline = baseline_data.copy()
-        baseline['point_val'] = pd.to_numeric(baseline['point_val'], errors='coerce')
-        baseline['Matching'] = baseline['Matching'].fillna('Unknown').astype(str)
-        baseline = baseline.dropna(subset=['point_val'])
-        if baseline.empty:
-            return default_by_tool_median_shift_result('No valid baseline values')
-        baseline = baseline[baseline['Matching'].isin(eligible_tools)].copy()
-        if baseline.empty:
-            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
-
-        baseline_summary = (
-            baseline.groupby('Matching')['point_val']
-            .agg(baseline_median='median', baseline_count='count')
-            .reset_index()
-        )
-        baseline_summary = baseline_summary[baseline_summary['baseline_count'] >= min_points].copy()
-        if baseline_summary.empty:
-            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
-
-        eligible_matching = set(baseline_summary['Matching'])
-        weekly_stats = weekly_stats[weekly_stats['Matching'].isin(eligible_matching)].copy()
-        if weekly_stats.empty:
-            return default_by_tool_median_shift_result('Insufficient eligible tools (n=0)')
-
-        grouped_weekly = weekly.groupby('Matching')['point_val']
-        grouped_baseline = baseline.groupby('Matching')['point_val']
-        tool_records = []
         percentile_order = ('P95', 'P50', 'P05')
-
-        for tool_name in sorted(eligible_matching):
-            weekly_values = grouped_weekly.get_group(tool_name).to_numpy()
-            baseline_values = grouped_baseline.get_group(tool_name).to_numpy()
-            weekly_percentiles = get_percentiles(weekly_values)
-            baseline_percentiles = get_percentiles(baseline_values)
-
-            base_stats = {
-                'values': baseline_values,
-                'cnt': len(baseline_values),
-                'mean': float(np.mean(baseline_values)),
-                'sigma': float(np.std(baseline_values, ddof=1)) if len(baseline_values) > 1 else 0.0,
+        tool_records = []
+        for _, row in detail.iterrows():
+            k_values = {p: pd.to_numeric(row.get(f'{p} K'), errors='coerce') for p in percentile_order}
+            diffs = {
+                p: abs(float(row.get(f'Weekly {p}', np.nan)) - float(row.get(f'Baseline {p}', np.nan)))
+                for p in percentile_order
             }
-            weekly_tool_stats = {
-                'values': weekly_values,
-                'cnt': len(weekly_values),
-                'mean': float(np.mean(weekly_values)),
-                'sigma': float(np.std(weekly_values, ddof=1)) if len(weekly_values) > 1 else 0.0,
-            }
-            shift_result = kshift_sigma_ratio_calculator(
-                base_stats,
-                weekly_tool_stats,
-                chart_info.get('Characteristics'),
-                chart_info.get('Resolution'),
-                chart_info.get('UCL'),
-                chart_info.get('LCL'),
-                k_threshold=k_threshold,
-            )
-
-            k_values = {}
-            diffs = {}
-            triggered_rules = []
-            for percentile in percentile_order:
-                k_value = pd.to_numeric(
-                    pd.Series([shift_result.get(f'{percentile}_k', np.nan)]),
-                    errors='coerce'
-                ).iloc[0]
-                k_values[percentile] = float(k_value) if pd.notna(k_value) and np.isfinite(k_value) else np.nan
-                diffs[percentile] = abs(
-                    float(weekly_percentiles[percentile]) - float(baseline_percentiles[percentile])
-                )
-                if shift_result.get(f'{percentile}_shift') == 'HIGHLIGHT':
-                    triggered_rules.append(f'{percentile}_shift')
-
-            valid_k = [(p, k_values[p]) for p in percentile_order if pd.notna(k_values[p])]
-            if not valid_k:
-                continue
-            peak_percentile, peak_k = max(valid_k, key=lambda item: item[1])
-            peak_diff = diffs[peak_percentile]
-            tool_highlight = bool(triggered_rules)
-
+            valid_k = [(p, float(k)) for p, k in k_values.items() if pd.notna(k) and np.isfinite(k)]
+            peak_percentile, peak_k = max(valid_k, key=lambda item: item[1]) if valid_k else ('P50', np.nan)
+            peak_diff = diffs.get(peak_percentile, np.nan)
+            triggered_rules = [f'{p}_shift' for p in percentile_order if row.get(f'{p} HL') == 'HIGHLIGHT']
             tool_records.append({
-                'tool': str(tool_name),
-                'weekly_median': round(float(weekly_percentiles['P50']), 8),
-                'baseline_median': round(float(baseline_percentiles['P50']), 8),
-                'weekly_count': int(len(weekly_values)),
-                'baseline_count': int(len(baseline_values)),
-                # Backward-compatible summary fields used by the current UI.
-                'diff': round(float(peak_diff), 8),
-                'k': round(float(peak_k), 4),
-                'max_percentile': peak_percentile,
-                'highlight': tool_highlight,
+                'tool': str(row['Tool']),
+                'weekly_median': round(float(row.get('Weekly P50', np.nan)), 8),
+                'baseline_median': round(float(row.get('Baseline P50', np.nan)), 8),
+                'weekly_count': int(row['Weekly Count']),
+                'baseline_count': int(row['Baseline Count']),
+                'rolling_used': bool(row.get('Rolling Used', False)),
+                'rolling_points_borrowed': int(row.get('Rolling Points Borrowed', 0)),
+                'calculation_weekly_count': int(row.get('Calculation Weekly Count', row['Weekly Count'])),
+                'calculation_baseline_count': int(row.get('Calculation Baseline Count', row['Baseline Count'])),
+                'eligible': bool(row['Eligible']),
+                'highlight': row['Highlight'] == 'HIGHLIGHT',
                 'triggered_rules': triggered_rules,
-                # Full per-tool result from the whole-chart shift algorithm.
-                'p95_diff': round(float(diffs['P95']), 8),
-                'p50_diff': round(float(diffs['P50']), 8),
-                'p05_diff': round(float(diffs['P05']), 8),
+                'exemption_reasons': row.get('Exemption Reasons', ''),
+                'k_gt_5_kept_rules': [v for v in str(row.get('K > 5 Kept Rules', '')).split(', ') if v],
+                'whole_baseline_p95': row.get('Whole Baseline P95'),
+                'whole_baseline_p05': row.get('Whole Baseline P05'),
+                'diff': round(float(peak_diff), 8) if pd.notna(peak_diff) else None,
+                'k': round(float(peak_k), 4) if pd.notna(peak_k) else None,
+                'max_percentile': peak_percentile,
+                'p95_diff': round(float(diffs['P95']), 8) if pd.notna(diffs['P95']) else None,
+                'p50_diff': round(float(diffs['P50']), 8) if pd.notna(diffs['P50']) else None,
+                'p05_diff': round(float(diffs['P05']), 8) if pd.notna(diffs['P05']) else None,
                 'p95_k': round(float(k_values['P95']), 4) if pd.notna(k_values['P95']) else None,
                 'p50_k': round(float(k_values['P50']), 4) if pd.notna(k_values['P50']) else None,
                 'p05_k': round(float(k_values['P05']), 4) if pd.notna(k_values['P05']) else None,
-                'p95_shift': shift_result.get('P95_shift', 'NO_HIGHLIGHT'),
-                'p50_shift': shift_result.get('P50_shift', 'NO_HIGHLIGHT'),
-                'p05_shift': shift_result.get('P05_shift', 'NO_HIGHLIGHT'),
+                'p95_shift': row.get('P95 HL'),
+                'p50_shift': row.get('P50 HL'),
+                'p05_shift': row.get('P05 HL'),
             })
 
-        if not tool_records:
-            return default_by_tool_median_shift_result('No valid K-shift denominator')
-
-        tool_records.sort(
-            key=lambda item: (-item['k'], -item['weekly_count'], -item['baseline_count'], item['tool'])
-        )
-        max_record = tool_records[0]
+        tool_records.sort(key=lambda item: (
+            -(item['k'] if item['k'] is not None else -np.inf),
+            -item['weekly_count'], -item['baseline_count'], item['tool']
+        ))
+        valid_records = [item for item in tool_records if item['k'] is not None]
+        max_record = valid_records[0] if valid_records else tool_records[0]
         max_tool = max_record['tool']
-        max_diff = float(max_record['diff'])
-        max_k = float(max_record['k'])
+        max_diff = max_record['diff'] if max_record['diff'] is not None else np.nan
+        max_k = max_record['k'] if max_record['k'] is not None else np.nan
 
         shifted_records = [item for item in tool_records if item['highlight']]
         top_tools = ', '.join(
@@ -2248,7 +2182,7 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
         all_tools_json = json.dumps(tool_records, ensure_ascii=False)
 
         display_top = '/'.join(item['tool'] for item in shifted_records) if shifted_records else 'N/A'
-        display = f"Top={display_top}, Shifted={len(shifted_records)}"
+        display = f"Top={display_top}, Shifted={len(shifted_records)}, Eligible={sum(item['eligible'] for item in tool_records)}"
         highlight = 'HIGHLIGHT' if shifted_records else 'NO_HIGHLIGHT'
         result.update({
             'HL_by_tool_shift': highlight,
@@ -2259,6 +2193,7 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
             'by_tool_median_shift_tool_count': int(len(tool_records)),
             'by_tool_median_shift_top_tools': top_tools,
             'by_tool_median_shift_top_count': int(len(shifted_records)),
+            'by_tool_eligible_count': int(sum(item['eligible'] for item in tool_records)),
             'by_tool_median_shift_all_tools_json': all_tools_json,
         })
         return result
@@ -2463,6 +2398,7 @@ def process_single_chart(chart_info, raw_df, initial_baseline_start_date, baseli
             'by_tool_median_shift_tool_count': by_tool_median_results.get('by_tool_median_shift_tool_count', 0),
             'by_tool_median_shift_top_tools': by_tool_median_results.get('by_tool_median_shift_top_tools', 'N/A'),
             'by_tool_median_shift_top_count': by_tool_median_results.get('by_tool_median_shift_top_count', 0),
+            'by_tool_eligible_count': by_tool_median_results.get('by_tool_eligible_count', 0),
             'by_tool_median_shift_all_tools_json': by_tool_median_results.get('by_tool_median_shift_all_tools_json', '[]'),
             'group_name': chart_info.get('group_name', 'N/A'),
             'chart_name': chart_info.get('chart_name', 'N/A'),
@@ -6321,6 +6257,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                 'by_tool_median_shift_tool_count',
                 'by_tool_median_shift_top_tools',
                 'by_tool_median_shift_top_count',
+                'by_tool_eligible_count',
                 'by_tool_median_shift_all_tools_json',
             ]:
                 chart_info[key] = result.get(key)
@@ -6516,6 +6453,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'by_tool_median_shift_tool_count': by_tool_median_results.get('by_tool_median_shift_tool_count', 0),
                     'by_tool_median_shift_top_tools': by_tool_median_results.get('by_tool_median_shift_top_tools', 'N/A'),
                     'by_tool_median_shift_top_count': by_tool_median_results.get('by_tool_median_shift_top_count', 0),
+                    'by_tool_eligible_count': by_tool_median_results.get('by_tool_eligible_count', 0),
                     'by_tool_median_shift_all_tools_json': by_tool_median_results.get('by_tool_median_shift_all_tools_json', '[]')
                 })
                 
@@ -6549,6 +6487,7 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                     'by_tool_median_shift_tool_count': 0,
                     'by_tool_median_shift_top_tools': 'N/A',
                     'by_tool_median_shift_top_count': 0,
+                    'by_tool_eligible_count': 0,
                     'by_tool_median_shift_all_tools_json': '[]'
                 })
                 print(f" - _process_discrete_chart: 基線數據不足，所有 OOB 設為 NO_HIGHLIGHT")
@@ -6700,7 +6639,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
                          'by_tool_median_shift_max_tool',
                          'by_tool_median_shift_max_diff', 'by_tool_median_shift_max_k',
                          'by_tool_median_shift_tool_count', 'by_tool_median_shift_top_tools',
-                         'by_tool_median_shift_top_count', 'by_tool_median_shift_all_tools_json',
+                         'by_tool_median_shift_top_count', 'by_tool_eligible_count',
+                         'by_tool_median_shift_all_tools_json',
                          'HL_record_high_low', 'record_high', 'record_low',
                          'record_high_count', 'record_low_count', 'record_high_low_count',
                          'record_high_low_risk', 'record_high_low_display',
