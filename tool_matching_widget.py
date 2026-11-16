@@ -7,6 +7,118 @@ import pickle
 # Translation System
 from translations import get_translator, tr
 from analysis_selection import filter_chart_info_for_analysis, warn_if_no_analysis_selection
+from by_tool_oob_analysis import build_by_tool_plot_styles
+
+
+TOOL_OUTLIER_SIGMA = 2.5
+TOOL_MATCHING_MIN_POINTS = 5
+
+
+def normalize_matching_groups(df, group_column="matching_group"):
+    """Normalize missing/blank Tool identifiers so pandas grouping stays safe."""
+    normalized = df.copy()
+    if group_column not in normalized.columns:
+        normalized[group_column] = "Unknown"
+        return normalized
+    groups = normalized[group_column].fillna("Unknown").astype(str).str.strip()
+    normalized[group_column] = groups.mask(groups.eq(""), "Unknown")
+    return normalized
+
+
+def remove_tool_outliers(df, group_column="matching_group", value_column="point_val",
+                         sigma_limit=TOOL_OUTLIER_SIGMA):
+    """Remove one-pass mean +/- sigma_limit * sample-SD outliers per Tool."""
+    if df.empty or group_column not in df.columns or value_column not in df.columns:
+        return df.copy(), df.iloc[0:0].copy()
+
+    cleaned = df.copy()
+    cleaned[value_column] = pd.to_numeric(cleaned[value_column], errors="coerce")
+    group_values = cleaned.groupby(group_column, dropna=False)[value_column]
+    group_mean = group_values.transform("mean")
+    group_sigma = group_values.transform("std")
+    valid_sigma = group_sigma.notna() & (group_sigma > 0)
+    distance = (cleaned[value_column] - group_mean).abs()
+    outlier_mask = valid_sigma & (distance > sigma_limit * group_sigma)
+    return cleaned.loc[~outlier_mask].copy(), cleaned.loc[outlier_mask].copy()
+
+
+def filter_plot_eligible_tools(df, group_column="matching_group",
+                               value_column="point_val",
+                               min_points=TOOL_MATCHING_MIN_POINTS):
+    """Keep only Tool groups with enough usable points to be compared."""
+    if df.empty or group_column not in df.columns or value_column not in df.columns:
+        return df.iloc[0:0].copy()
+    group_count = df.groupby(group_column, dropna=False)[value_column].transform("count")
+    return df.loc[group_count >= min_points].copy()
+
+
+def format_matching_value(value, index_value=False, detailed=False):
+    """Format Tool Matching values compactly without changing stored precision."""
+    if value in ("Insufficient Data", "No Comparison", "", None, "-"):
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(number):
+        return "∞" if number > 0 else ("-∞" if number < 0 else "NaN")
+    if index_value:
+        decimal_places = 6 if detailed else 3
+        return f"{number:.{decimal_places}f}"
+    significant_digits = 6 if detailed else 5
+    return f"{number:.{significant_digits}g}"
+
+
+def matching_value_tooltip(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"Full precision: {number:.10g}" if np.isfinite(number) else str(number)
+
+
+def matching_alarm_result(mean_index, sigma_index, k_value, sigma, sigma_reference, settings):
+    """Return the Tool Matching alarm state and type using current settings."""
+    if mean_index == "Insufficient Data" or sigma_index == "Insufficient Data" or k_value == "No Comparison":
+        return False, ""
+    try:
+        mean_threshold = settings.get("mean_index_threshold", 1.0) if settings.get("mean_index_enabled", False) else 1.0
+        sigma_threshold = (
+            settings.get("sigma_index_threshold", 2.0)
+            if settings.get("sigma_index_enabled", False)
+            else float(k_value)
+        )
+        mean_alarm = float(mean_index) >= float(mean_threshold)
+        zero_sigma_match = float(sigma) == 0.0 and float(sigma_reference) == 0.0
+        sigma_alarm = False if zero_sigma_match else float(sigma_index) >= float(sigma_threshold)
+    except (TypeError, ValueError):
+        return False, ""
+    if mean_alarm and sigma_alarm:
+        return True, "Mean, Sigma"
+    if mean_alarm:
+        return True, "Mean"
+    if sigma_alarm:
+        return True, "Sigma"
+    return False, ""
+
+
+def matching_axis_layout(tool_count):
+    """Keep Tool labels readable through at least 20 groups."""
+    if tool_count <= 10:
+        return {"rotation": 0, "fontsize": 8, "figure_width": 7.0, "legend_columns": 1}
+    if tool_count <= 20:
+        return {
+            "rotation": 55,
+            "fontsize": 7,
+            "figure_width": max(8.0, 5.0 + 0.35 * tool_count),
+            "legend_columns": 2,
+        }
+    return {
+        "rotation": 65,
+        "fontsize": 6.5,
+        "figure_width": min(14.0, 6.0 + 0.3 * tool_count),
+        "legend_columns": 3,
+    }
 
 # Check if openpyxl package is installed
 try:
@@ -402,6 +514,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         self._load_saved_settings()
         
         self.current_export_data = None
+        self.outlier_counts = {}
         self.init_ui()
 
     def update_paths(self, excel_path, raw_data_dir):
@@ -625,6 +738,13 @@ class ToolMatchingWidget(QtWidgets.QWidget):
 
     def calculate_mean_index(self, mean1, mean2, min_sigma, characteristic):
         if min_sigma <= 0:
+            means_equal = round(float(mean1), 8) == round(float(mean2), 8)
+            if means_equal:
+                return 0.0
+            if characteristic == 'Bigger':
+                return float('inf') if mean1 < mean2 else 0.0
+            if characteristic in ['Smaller', 'Sigma']:
+                return float('inf') if mean1 > mean2 else 0.0
             return float('inf')
         if characteristic == 'Bigger':
             return (mean2 - mean1) / min_sigma
@@ -664,6 +784,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
 
         results = []
         self.chart_figures = {}
+        self.outlier_counts = {}
         total_charts = len(all_charts_info)
 
         for i, row in all_charts_info.iterrows():
@@ -696,12 +817,19 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 subdf['matching_group'] = subdf['ByTool']
             else:
                 subdf['matching_group'] = 'Unknown'
+            subdf = normalize_matching_groups(subdf)
 
             subdf['characteristic'] = characteristic
             subdf['GroupName'] = gname
             subdf['ChartName'] = cname
             subdf["point_time"] = pd.to_datetime(subdf["point_time"], errors='coerce')
+            subdf["point_val"] = pd.to_numeric(subdf["point_val"], errors='coerce')
             subdf = subdf.dropna(subset=['point_time', 'point_val'])
+
+            # Tool Matching uses a one-pass, per-Tool 2.5-sigma cleanup. Removed
+            # points do not enter date filtering, statistics, or chart rendering.
+            subdf, outliers = remove_tool_outliers(subdf)
+            self.outlier_counts[(gname, cname)] = len(outliers)
 
             if subdf.empty:
                 continue
@@ -713,7 +841,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                     self._analyze_two_groups(group_stats, gname, cname, characteristic, results)
                 else:
                     self._analyze_multiple_groups(subdf, group_stats, gname, cname, characteristic, results)
-                self._create_boxplot_single(subdf, gname, cname)
+                self._create_boxplot_single(subdf, gname, cname, results)
 
             elif filter_mode == 1 or filter_mode == 2:
                 if filter_mode == 1:
@@ -764,7 +892,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 else:
                     self._analyze_multiple_groups_time(mean_df, sigma_df, group_stats, gname, cname, characteristic, results)
                 
-                self._create_boxplot_single(mean_df if not mean_df.empty else subdf, gname, cname)
+                self._create_boxplot_single(mean_df if not mean_df.empty else subdf, gname, cname, results)
 
         self.progress_bar.setVisible(False)
         self._display_results(results)
@@ -791,31 +919,25 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             mean_index_1 = self.calculate_mean_index(mean1, mean2, min_sigma, characteristic)
             sigma_index_1 = std1 / min_sigma
         else:
-            if len(set([round(m, 8) for m in [mean1, mean2]])) == 1:
-                mean_index_1, sigma_index_1 = 0, 0
-            else:
-                mean_index_1, sigma_index_1 = float('inf'), float('inf')
+            mean_index_1 = self.calculate_mean_index(mean1, mean2, min_sigma, characteristic)
+            sigma_index_1 = 0.0 if std1 == 0 else float('inf')
 
         results.append([gname, cname, group1, 'group_all', 
-            'Insufficient Data' if k1=="No Comparison" else round(mean_index_1, 2), 
-            'Insufficient Data' if k1=="No Comparison" else round(sigma_index_1, 2),
-            k1 if isinstance(k1, str) else round(k1, 2), 
-            round(mean1, 2), round(std1, 2), round(mean2, 2), round(min_sigma, 2), n1, characteristic])
+            'Insufficient Data' if k1=="No Comparison" else mean_index_1,
+            'Insufficient Data' if k1=="No Comparison" else sigma_index_1,
+            k1, mean1, std1, mean2, min_sigma, n1, characteristic])
 
         if min_sigma > 0:
             mean_index_2 = self.calculate_mean_index(mean2, mean1, min_sigma, characteristic)
             sigma_index_2 = std2 / min_sigma
         else:
-            if len(set([round(m, 8) for m in [mean1, mean2]])) == 1:
-                mean_index_2, sigma_index_2 = 0, 0
-            else:
-                mean_index_2, sigma_index_2 = float('inf'), float('inf')
+            mean_index_2 = self.calculate_mean_index(mean2, mean1, min_sigma, characteristic)
+            sigma_index_2 = 0.0 if std2 == 0 else float('inf')
 
         results.append([gname, cname, group2, 'group_all', 
-            'Insufficient Data' if k2=="No Comparison" else round(mean_index_2, 2), 
-            'Insufficient Data' if k2=="No Comparison" else round(sigma_index_2, 2),
-            k2 if isinstance(k2, str) else round(k2, 2), 
-            round(mean2, 2), round(std2, 2), round(mean1, 2), round(min_sigma, 2), n2, characteristic])
+            'Insufficient Data' if k2=="No Comparison" else mean_index_2,
+            'Insufficient Data' if k2=="No Comparison" else sigma_index_2,
+            k2, mean2, std2, mean1, min_sigma, n2, characteristic])
 
     def _analyze_multiple_groups(self, subdf, group_stats, gname, cname, characteristic, results):
         valid_stats = group_stats[group_stats['count'] >= 5]
@@ -844,18 +966,14 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 mean_index = self.calculate_mean_index(mean, mean_median, median_sigma, characteristic)
                 sigma_index = std / median_sigma
             else:
-                all_means = group_stats['mean'].tolist() if not group_stats.empty else [mean]
-                if len(set([round(m, 8) for m in all_means])) == 1:
-                    mean_index, sigma_index = 0, 0
-                else:
-                    mean_index, sigma_index = float('inf'), float('inf')
+                mean_index = self.calculate_mean_index(mean, mean_median, median_sigma, characteristic)
+                sigma_index = 0.0 if std == 0 else float('inf')
 
             K = self.get_k_value(n)
             results.append([gname, cname, group, "group_all", 
-                'Insufficient Data' if K=="No Comparison" else round(mean_index, 2), 
-                'Insufficient Data' if K=="No Comparison" else round(sigma_index, 2), 
-                K if isinstance(K, str) else round(K, 2), 
-                round(mean, 2), round(std, 2), round(mean_median, 2), round(median_sigma, 2), n, characteristic])
+                'Insufficient Data' if K=="No Comparison" else mean_index,
+                'Insufficient Data' if K=="No Comparison" else sigma_index,
+                K, mean, std, mean_median, median_sigma, n, characteristic])
 
     def _analyze_multiple_groups_time(self, mean_df, sigma_df, group_stats, gname, cname, characteristic, results):
         valid_mean_df = mean_df.groupby("matching_group").filter(lambda x: len(x) >= 5)
@@ -888,27 +1006,24 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 mean_index = self.calculate_mean_index(mean, mean_median, median_sigma, characteristic)
                 sigma_index = std / median_sigma
             else:
-                all_means = group_stats['mean'].tolist() if not group_stats.empty else [mean]
-                if len(set([round(m, 8) for m in all_means])) == 1:
-                    mean_index, sigma_index = 0, 0
-                else:
-                    mean_index, sigma_index = float('inf'), float('inf')
+                mean_index = self.calculate_mean_index(mean, mean_median, median_sigma, characteristic)
+                sigma_index = 0.0 if std == 0 else float('inf')
                     
             K = self.get_k_value(n)
             results.append([gname, cname, group, "group_all", 
-                'Insufficient Data' if K=="No Comparison" else round(mean_index, 2), 
-                'Insufficient Data' if K=="No Comparison" else round(sigma_index, 2), 
-                K if isinstance(K, str) else round(K, 2), 
-                round(mean, 2), round(std, 2), round(mean_median, 2), round(median_sigma, 2), n, characteristic])
+                'Insufficient Data' if K=="No Comparison" else mean_index,
+                'Insufficient Data' if K=="No Comparison" else sigma_index,
+                K, mean, std, mean_median, median_sigma, n, characteristic])
 
-    def _create_boxplot_single(self, subdf, gname, cname):
+    def _create_boxplot_single(self, subdf, gname, cname, results):
         try:
             import matplotlib.pyplot as plt
-            from matplotlib import cm
             import numpy as np
         except ImportError:
             return
 
+        subdf = normalize_matching_groups(subdf)
+        subdf = filter_plot_eligible_tools(subdf)
         unique_groups = sorted(subdf["matching_group"].unique(), key=lambda x: str(x))
         labels = [str(mg) for mg in unique_groups]
 
@@ -918,18 +1033,40 @@ class ToolMatchingWidget(QtWidgets.QWidget):
 
         box_data = [subdf[subdf["matching_group"] == mg]["point_val"].values for mg in unique_groups]
         group_stats = subdf.groupby("matching_group")["point_val"].agg(['mean', 'std', 'count'])
-        colors = cm.tab10(np.linspace(0, 1, len(unique_groups)))
+        styles = build_by_tool_plot_styles(labels)
+        alarm_groups = {
+            str(row[2])
+            for row in results
+            if len(row) >= 13 and str(row[0]) == str(gname) and str(row[1]) == str(cname)
+            and matching_alarm_result(row[4], row[5], row[6], row[8], row[10], self.tool_matching_settings)[0]
+        }
+        axis_layout = matching_axis_layout(len(unique_groups))
+        figure_size = (axis_layout["figure_width"], 4.8)
 
         # 1. SPC 風格圖表
-        scatter_fig, scatter_ax = plt.subplots(figsize=(7, 4.5))
+        scatter_fig, scatter_ax = plt.subplots(figsize=figure_size)
         x_position = 0
         for i, mg in enumerate(unique_groups):
             group_data = subdf[subdf["matching_group"] == mg].sort_values("point_time")
             if not group_data.empty:
                 x_vals = np.arange(x_position, x_position + len(group_data))
                 y_vals = group_data["point_val"].values
-                scatter_ax.scatter(x_vals, y_vals, color=colors[i], alpha=0.8, s=40, label=f'{mg}', zorder=3)
-                scatter_ax.plot(x_vals, y_vals, color=colors[i], alpha=0.5, linewidth=1, zorder=2)
+                style = styles[str(mg)]
+                is_alarm = str(mg) in alarm_groups
+                alpha = 0.95 if is_alarm else 0.45
+                if is_alarm:
+                    scatter_ax.axvspan(
+                        x_position - 0.5, x_position + len(group_data) - 0.5,
+                        color="#FFF4CC", alpha=0.8, zorder=0,
+                    )
+                scatter_ax.scatter(
+                    x_vals, y_vals, color=style["color"], marker=style["marker"],
+                    alpha=alpha, s=42, label=f'{mg}', zorder=3,
+                )
+                scatter_ax.plot(
+                    x_vals, y_vals, color=style["color"],
+                    alpha=0.8 if is_alarm else 0.3, linewidth=1, zorder=2,
+                )
                 if i < len(unique_groups) - 1:
                     scatter_ax.axvline(x=x_position + len(group_data) - 0.5, color='gray', linestyle='-', alpha=0.3, zorder=1)
                 x_position += len(group_data)
@@ -946,29 +1083,66 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 group_positions.append(x_pos + group_size/2 - 0.5)
                 x_pos += group_size
             scatter_ax.set_xticks(group_positions)
-            scatter_ax.set_xticklabels(labels, rotation=0, ha='center')
+            scatter_ax.set_xticklabels(
+                labels,
+                rotation=axis_layout["rotation"],
+                ha='right' if axis_layout["rotation"] else 'center',
+                fontsize=axis_layout["fontsize"],
+            )
             scatter_ax.tick_params(axis='x', which='minor', bottom=True, top=False)
 
-        scatter_ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize='small')
+        scatter_ax.legend(
+            loc='upper left', bbox_to_anchor=(1.01, 1),
+            fontsize=7 if len(unique_groups) > 10 else 'small',
+            ncol=axis_layout["legend_columns"],
+        )
         scatter_fig.tight_layout()
 
         # 2. 盒鬚圖
-        box_fig, box_ax = plt.subplots(figsize=(7, 4.5))
+        box_fig, box_ax = plt.subplots(figsize=figure_size)
         if box_data:
             bp = box_ax.boxplot(box_data, labels=labels, patch_artist=True, widths=0.6)
-            for patch, color in zip(bp['boxes'], colors):
-                patch.set_facecolor(color)
+            for i, (patch, mg) in enumerate(zip(bp['boxes'], unique_groups)):
+                style = styles[str(mg)]
+                is_alarm = str(mg) in alarm_groups
+                alpha = 0.95 if is_alarm else 0.45
+                if is_alarm:
+                    box_ax.axvspan(i + 0.5, i + 1.5, color="#FFF4CC", alpha=0.8, zorder=0)
+                patch.set_facecolor(style["color"])
+                patch.set_edgecolor(style["color"])
+                patch.set_alpha(alpha)
+                for artist_name in ('whiskers', 'caps'):
+                    for artist in bp[artist_name][2 * i:2 * i + 2]:
+                        artist.set_color(style["color"])
+                        artist.set_alpha(alpha)
+                bp['medians'][i].set_color(style["color"])
+                bp['medians'][i].set_alpha(alpha)
+                if i < len(bp['fliers']):
+                    bp['fliers'][i].set_marker(style["marker"])
+                    bp['fliers'][i].set_markeredgecolor(style["color"])
+                    bp['fliers'][i].set_alpha(alpha)
             legend_labels = [
-                f"{label}: μ={group_stats.loc[mg, 'mean']:.2f}, σ={group_stats.loc[mg, 'std']:.2f}, n={int(group_stats.loc[mg, 'count'])}"
+                f"{label}: μ={format_matching_value(group_stats.loc[mg, 'mean'])}, "
+                f"σ={format_matching_value(group_stats.loc[mg, 'std'])}, n={int(group_stats.loc[mg, 'count'])}"
                 for label, mg in zip(labels, unique_groups)
             ]
-            box_ax.legend([bp["boxes"][i] for i in range(len(labels))], legend_labels, loc='upper left', bbox_to_anchor=(1.02, 1), fontsize='small')
+            box_ax.legend(
+                [bp["boxes"][i] for i in range(len(labels))], legend_labels,
+                loc='upper left', bbox_to_anchor=(1.01, 1),
+                fontsize=6.5 if len(unique_groups) > 10 else 'small',
+                ncol=axis_layout["legend_columns"],
+            )
 
         box_ax.set_title(f"Boxplot: {gname} - {cname}", fontsize=10)
         box_ax.set_xlabel("Matching Group")
         box_ax.set_ylabel("Point Value")
         box_ax.grid(True, linestyle='--', alpha=0.6)
-        box_fig.subplots_adjust(right=0.7)
+        box_ax.set_xticklabels(
+            labels,
+            rotation=axis_layout["rotation"],
+            ha='right' if axis_layout["rotation"] else 'center',
+            fontsize=axis_layout["fontsize"],
+        )
         box_fig.tight_layout()
 
         self.chart_figures[(gname, cname)] = {'scatter': scatter_fig, 'box': box_fig}
@@ -1016,7 +1190,11 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                             mean_threshold = self.tool_matching_settings.get('mean_index_threshold', 1.0) if self.tool_matching_settings.get('mean_index_enabled', False) else 1.0
                             sigma_threshold = self.tool_matching_settings.get('sigma_index_threshold', 2.0) if self.tool_matching_settings.get('sigma_index_enabled', False) else (float(k_val) if k_val not in [None, '', 'No Comparison'] else 2.0)
                             mean_abn = float(m_idx) >= mean_threshold
-                            sigma_abn = float(s_idx) >= sigma_threshold
+                            zero_sigma_match = (
+                                float(stats.get("sigma", np.nan)) == 0.0
+                                and float(stats.get("sigma_median", np.nan)) == 0.0
+                            )
+                            sigma_abn = False if zero_sigma_match else float(s_idx) >= sigma_threshold
                             if mean_abn or sigma_abn:
                                 is_abnormal = True
                                 if mean_abn and sigma_abn: abnormal_type = "Mean, Sigma"
@@ -1059,16 +1237,26 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 self.result_table.setCellWidget(i, 0, cell_widget)
 
                 for j, val in enumerate(item_info["data"]):
-                    if j in [4,5,6,7,8,9,10]:
-                        try:
-                            if val not in ['Insufficient Data', 'No Comparison', '', None]: val = f"{float(val):.2f}"
-                        except: pass
+                    raw_val = val
+                    if j in [4, 5, 6]:
+                        val = format_matching_value(val, index_value=True)
+                    elif j in [7, 8, 9, 10]:
+                        val = format_matching_value(val)
                     item = QtWidgets.QTableWidgetItem(str(val))
+                    if j in [4, 5, 6, 7, 8, 9, 10]:
+                        item.setToolTip(matching_value_tooltip(raw_val))
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                     
                     is_abn = False
                     try:
-                        if (j == 4 and float(item_info["data"][4]) >= 1) or (j == 5 and float(item_info["data"][5]) >= float(item_info["data"][6])):
+                        zero_sigma_match = (
+                            float(item_info["data"][8]) == 0.0
+                            and float(item_info["data"][10]) == 0.0
+                        )
+                        if (j == 4 and float(item_info["data"][4]) >= 1) or (
+                            j == 5 and not zero_sigma_match
+                            and float(item_info["data"][5]) >= float(item_info["data"][6])
+                        ):
                             is_abn = True
                     except: pass
                     if is_abn: item.setForeground(QtGui.QColor("#D32F2F"))
@@ -1177,7 +1365,11 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 m_th = self.tool_matching_settings.get('mean_index_threshold', 1.0) if self.tool_matching_settings.get('mean_index_enabled', False) else 1.0
                 s_th = self.tool_matching_settings.get('sigma_index_threshold', 2.0) if self.tool_matching_settings.get('sigma_index_enabled', False) else float(k_val) if k_val not in [None, ''] else 2.0
                 m_abn = float(m_idx) >= m_th
-                s_abn = float(s_idx) >= s_th
+                zero_sigma_match = (
+                    float(stats.get("sigma", np.nan)) == 0.0
+                    and float(stats.get("sigma_median", np.nan)) == 0.0
+                )
+                s_abn = False if zero_sigma_match else float(s_idx) >= s_th
                 if m_abn and s_abn: abnormal_type = "Mean, Sigma"
                 elif m_abn: abnormal_type = "Mean"
                 elif s_abn: abnormal_type = "Sigma"
@@ -1205,11 +1397,14 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         info_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
 
         for j, value in enumerate(row_values):
-            if j in [4,5,6,7,8,9,10]:
-                try:
-                    if value not in ['Insufficient Data', 'No Comparison', '', None]: value = f"{float(value):.2f}"
-                except: pass
+            raw_value = value
+            if j in [4, 5, 6]:
+                value = format_matching_value(value, index_value=True, detailed=True)
+            elif j in [7, 8, 9, 10]:
+                value = format_matching_value(value, detailed=True)
             item = QtWidgets.QTableWidgetItem(str(value))
+            if j in [4, 5, 6, 7, 8, 9, 10]:
+                item.setToolTip(matching_value_tooltip(raw_value))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             # 紅色標記：mean_index(j=4) 或 sigma_index(j=5) 異常時
             try:

@@ -508,6 +508,8 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self._batch_size = 25  # 每累積25筆錯誤就批次顯示一次
         
         self.analysis_chart_rows = []
+        self.analysis_chart_rows_by_excel_row = {}
+        self.analysis_excel_row_by_chart_key = {}
         self.analysis_log_row_states = {}
         self._loading_analysis_table = False
 
@@ -690,6 +692,8 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
 
     def reset_analysis_control_panel(self):
         self.analysis_chart_rows = []
+        self.analysis_chart_rows_by_excel_row = {}
+        self.analysis_excel_row_by_chart_key = {}
         clear_selected_analysis_rows(self)
         self.analysis_log_row_states = {}
         if hasattr(self, "table"):
@@ -705,6 +709,8 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
 
     def load_analysis_chart_selection(self):
         self.analysis_chart_rows = []
+        self.analysis_chart_rows_by_excel_row = {}
+        self.analysis_excel_row_by_chart_key = {}
         if not self.excel_path or not os.path.exists(self.excel_path):
             self.reset_analysis_control_panel()
             return
@@ -718,13 +724,18 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
 
         for idx, row in df.iterrows():
             excel_row = int(idx) + 2
-            self.analysis_chart_rows.append({
+            row_data = {
                 "excel_row": excel_row,
                 "group": str(row.get("GroupName", "")).strip(),
                 "chart": str(row.get("ChartName", "")).strip(),
                 "characteristics": str(row.get("Characteristics", "")).strip(),
                 "selected": True,
-            })
+            }
+            self.analysis_chart_rows.append(row_data)
+            self.analysis_chart_rows_by_excel_row[excel_row] = row_data
+            self.analysis_excel_row_by_chart_key[
+                f"{row_data['group']}_{row_data['chart']}"
+            ] = excel_row
 
         set_selected_analysis_rows(self, {row["excel_row"] for row in self.analysis_chart_rows})
         self.analysis_log_row_states = {row["excel_row"]: True for row in self.analysis_chart_rows}
@@ -746,15 +757,13 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         self.apply_filter()
 
     def set_visible_analysis_selection(self, selected):
-        self._loading_analysis_table = True
         visible_rows = self.get_visible_analysis_excel_rows()
         for row_data in self.analysis_chart_rows:
             if row_data["excel_row"] not in visible_rows:
                 continue
             row_data["selected"] = selected
             self.analysis_log_row_states[row_data["excel_row"]] = selected
-        self._loading_analysis_table = False
-        self.update_analysis_checkboxes_in_result_table()
+        self.update_analysis_checkboxes_in_result_table(visible_rows)
         self.sync_analysis_selection_to_owner()
 
     def on_analysis_chart_item_changed(self, item):
@@ -764,13 +773,14 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         excel_row = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if excel_row is None:
             return
-        for row_data in self.analysis_chart_rows:
-            if row_data["excel_row"] == excel_row:
-                row_data["selected"] = item.checkState() == QtCore.Qt.CheckState.Checked
-                self.analysis_log_row_states[excel_row] = row_data["selected"]
-                break
+        row_data = self.analysis_chart_rows_by_excel_row.get(excel_row)
+        if row_data is None:
+            return
+        row_data["selected"] = item.checkState() == QtCore.Qt.CheckState.Checked
+        self.analysis_log_row_states[excel_row] = row_data["selected"]
         self.sync_analysis_selection_to_owner()
-        self.update_analysis_checkboxes_in_result_table()
+        # Only duplicate result rows for this Chart need synchronization.
+        self.update_analysis_checkboxes_in_result_table({excel_row})
 
     def sync_analysis_selection_to_owner(self):
         selected_rows = {row["excel_row"] for row in self.analysis_chart_rows if row["selected"]}
@@ -803,18 +813,40 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
         chart_key = location
         if location.startswith("CSV (") and location.endswith(")"):
             chart_key = location[5:-1]
-        for row_data in self.analysis_chart_rows:
-            if chart_key == f"{row_data['group']}_{row_data['chart']}":
-                return row_data["excel_row"]
-        return None
+        return self.analysis_excel_row_by_chart_key.get(chart_key)
 
-    def update_analysis_checkboxes_in_result_table(self):
+    def update_analysis_checkboxes_in_result_table(self, excel_rows=None):
         if not hasattr(self, "table"):
             return
+        target_rows = set(excel_rows) if excel_rows is not None else None
+        was_loading = self._loading_analysis_table
+        sorting_enabled = self.table.isSortingEnabled()
+        signals_blocked = self.table.signalsBlocked()
+        model = self.table.model()
+        model_signals_blocked = model.signalsBlocked()
+        updates_enabled = self.table.updatesEnabled()
         self._loading_analysis_table = True
-        for row_idx in range(self.table.rowCount()):
-            self.populate_analysis_checkbox_for_table_row(row_idx)
-        self._loading_analysis_table = False
+        self.table.blockSignals(True)
+        model.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
+        try:
+            for row_idx in range(self.table.rowCount()):
+                if target_rows is not None:
+                    item = self.table.item(row_idx, 0)
+                    if item is None or item.data(QtCore.Qt.ItemDataRole.UserRole) not in target_rows:
+                        continue
+                self.populate_analysis_checkbox_for_table_row(row_idx)
+        finally:
+            model.blockSignals(model_signals_blocked)
+            if sorting_enabled:
+                self.table.setSortingEnabled(True)
+            self.table.setUpdatesEnabled(updates_enabled)
+            self.table.blockSignals(signals_blocked)
+            self._loading_analysis_table = was_loading
+            if updates_enabled:
+                self.table.viewport().update()
 
     def populate_analysis_checkbox_for_table_row(self, table_row):
         item = self.table.item(table_row, 0)
@@ -822,8 +854,7 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
             return
         excel_row = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if not self.analysis_chart_rows or excel_row not in self.analysis_log_row_states:
-            known_rows = {row["excel_row"] for row in self.analysis_chart_rows}
-            if excel_row not in known_rows:
+            if excel_row not in self.analysis_chart_rows_by_excel_row:
                 item.setText("-")
                 item.setData(QtCore.Qt.ItemDataRole.CheckStateRole, None)
                 item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
@@ -831,13 +862,16 @@ class DataHealthCheckWidget(QtWidgets.QWidget):
             self.analysis_log_row_states[excel_row] = True
 
         checked = self.analysis_log_row_states.get(excel_row, True)
-        item.setText("")
-        item.setFlags(
-            QtCore.Qt.ItemFlag.ItemIsUserCheckable
-            | QtCore.Qt.ItemFlag.ItemIsEnabled
-            | QtCore.Qt.ItemFlag.ItemIsSelectable
-        )
-        item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
+        if not (item.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable):
+            item.setText("")
+            item.setFlags(
+                QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                | QtCore.Qt.ItemFlag.ItemIsEnabled
+                | QtCore.Qt.ItemFlag.ItemIsSelectable
+            )
+        desired_state = QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked
+        if item.checkState() != desired_state:
+            item.setCheckState(desired_state)
 
     def update_analysis_selection_summary(self):
         if not hasattr(self, "analysis_selection_label"):

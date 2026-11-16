@@ -15,7 +15,14 @@ from CL_limit_class import CLTightenCalculator
 # Translation System
 from translations import TranslationManager, get_translator, tr
 from analysis_selection import filter_chart_info_for_analysis, get_selected_analysis_rows, warn_if_no_analysis_selection
-from by_tool_oob_analysis import evaluate_by_tool_new_rules
+from by_tool_oob_analysis import (
+    build_by_tool_plot_styles,
+    by_tool_plot_alpha,
+    evaluate_by_tool_new_rules,
+    filter_by_tool_plot_data,
+    format_by_tool_shift_label,
+    has_eligible_by_tool_shift,
+)
 # Excel 和圖片處理
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as OpenpyxlImage
@@ -2148,6 +2155,7 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
                 'triggered_rules': triggered_rules,
                 'exemption_reasons': row.get('Exemption Reasons', ''),
                 'k_gt_5_kept_rules': [v for v in str(row.get('K > 5 Kept Rules', '')).split(', ') if v],
+                'whole_baseline_count': int(row.get('Whole Baseline Count', 0)),
                 'whole_baseline_p95': row.get('Whole Baseline P95'),
                 'whole_baseline_p05': row.get('Whole Baseline P05'),
                 'diff': round(float(peak_diff), 8) if pd.notna(peak_diff) else None,
@@ -3115,7 +3123,6 @@ def plot_spc_by_tool_color(
     figure_size=(13, 2.5)
 ):
     import pandas as pd
-    import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
     fig = Figure(figsize=figure_size)
@@ -3124,12 +3131,19 @@ def plot_spc_by_tool_color(
     # 統一刻度字體大小
     ax.tick_params(axis='both', which='major', labelsize=PLOT_STYLE['tick'])
 
-    df = raw_df.copy()
+    df = filter_by_tool_plot_data(
+        raw_df,
+        chart_info.get('by_tool_median_shift_all_tools_json', '[]'),
+    )
     df['point_time'] = pd.to_datetime(df['point_time'])
     df = df.sort_values('point_time').reset_index(drop=True)
-    
-    if 'Matching' not in df.columns: df['Matching'] = 'Unknown'
-    df['Matching'] = df['Matching'].fillna('Unknown').astype(str)
+    if df.empty:
+        ax.text(0.5, 0.5, 'No eligible By Tool Shift data', ha='center', va='center', transform=ax.transAxes)
+        ax.axis('off')
+        canvas = FigureCanvas(fig)
+        canvas._plot_args = (raw_df.copy(), chart_info.copy(), weekly_start_date, weekly_end_date, oob_info)
+        canvas._plot_kind = 'spc_by_tool'
+        return canvas
     display_ooc_mask = get_ooc_mask(df['point_val'].values, chart_info.get('UCL'), chart_info.get('LCL'))
     display_ooc_indices = np.flatnonzero(display_ooc_mask)
     point_metadata = build_point_metadata(
@@ -3140,9 +3154,21 @@ def plot_spc_by_tool_color(
         ooc_indices=display_ooc_indices
     )
 
+    all_tools_json = chart_info.get('by_tool_median_shift_all_tools_json', '[]')
+    shift_comparison_active = has_eligible_by_tool_shift(all_tools_json)
+    try:
+        parsed_tool_info = json.loads(all_tools_json) if all_tools_json else []
+        tool_shift_info = {
+            str(item.get('tool', '')): item
+            for item in parsed_tool_info
+            if isinstance(item, dict) and item.get('tool') is not None
+        }
+    except Exception:
+        tool_shift_info = {}
+
     unique_tools = sorted(df['Matching'].unique())
-    colors = list(mcolors.TABLEAU_COLORS.values())
-    tool_color_map = {tool: colors[i % len(colors)] for i, tool in enumerate(unique_tools)}
+    tool_styles = build_by_tool_plot_styles(unique_tools)
+    tool_color_map = {tool: tool_styles[str(tool)]['color'] for tool in unique_tools}
 
     add_spc_background_zones(ax, df, weekly_start_date, weekly_end_date)
     ax.plot(df.index, df['point_val'], color="#696969", alpha=0.3, zorder=1)
@@ -3150,8 +3176,12 @@ def plot_spc_by_tool_color(
     artists = []
     for tool in unique_tools:
         subset = df[df['Matching'] == tool]
-        ln, = ax.plot(subset.index, subset['point_val'], marker='o', linestyle='', 
-                      color=tool_color_map[tool], label=tool, markersize=4, zorder=3)
+        tool_info = tool_shift_info.get(str(tool))
+        alpha = by_tool_plot_alpha(tool_info, shift_comparison_active)
+        ln, = ax.plot(
+            subset.index, subset['point_val'], marker=tool_styles[str(tool)]['marker'], linestyle='',
+            color=tool_color_map[tool], label=tool, markersize=5, alpha=alpha, zorder=3
+        )
         artists.append(ln)
     if len(display_ooc_indices) > 0:
         ax.plot(display_ooc_indices, df['point_val'].iloc[display_ooc_indices], 'ro', markersize=5, linestyle='None', zorder=4)
@@ -3193,7 +3223,6 @@ def plot_spc_by_tool_group(
     figure_size=(13, 2.5)
 ):
     import pandas as pd
-    import matplotlib.colors as mcolors
     from matplotlib.figure import Figure
 
     fig = Figure(figsize=figure_size)
@@ -3202,10 +3231,19 @@ def plot_spc_by_tool_group(
     # 統一刻度字體大小
     ax.tick_params(axis='both', which='major', labelsize=PLOT_STYLE['tick'])
 
-    df = raw_df.copy()
+    df = filter_by_tool_plot_data(
+        raw_df,
+        chart_info.get('by_tool_median_shift_all_tools_json', '[]'),
+    )
     df['point_time'] = pd.to_datetime(df['point_time'])
-    if 'Matching' not in df.columns: df['Matching'] = 'Unknown'
     df = df.sort_values(['Matching', 'point_time']).reset_index(drop=True)
+    if df.empty:
+        ax.text(0.5, 0.5, 'No eligible By Tool Shift data', ha='center', va='center', transform=ax.transAxes)
+        ax.axis('off')
+        canvas = FigureCanvas(fig)
+        canvas._plot_args = (raw_df.copy(), chart_info.copy(), weekly_start_date, weekly_end_date, oob_info)
+        canvas._plot_kind = 'spc_by_tool_group'
+        return canvas
     display_ooc_mask = get_ooc_mask(df['point_val'].values, chart_info.get('UCL'), chart_info.get('LCL'))
     display_ooc_indices = np.flatnonzero(display_ooc_mask)
     point_metadata = build_point_metadata(
@@ -3218,6 +3256,7 @@ def plot_spc_by_tool_group(
 
     tool_shift_info = {}
     all_tools_json = chart_info.get('by_tool_median_shift_all_tools_json', '[]')
+    shift_comparison_active = has_eligible_by_tool_shift(all_tools_json)
     try:
         parsed_tool_info = json.loads(all_tools_json) if all_tools_json else []
         for item in parsed_tool_info:
@@ -3228,8 +3267,8 @@ def plot_spc_by_tool_group(
         tool_shift_info = {}
 
     unique_tools = sorted(df['Matching'].unique())
-    colors = list(mcolors.TABLEAU_COLORS.values())
-    tool_color_map = {tool: colors[i % len(colors)] for i, tool in enumerate(unique_tools)}
+    tool_styles = build_by_tool_plot_styles(unique_tools)
+    tool_color_map = {tool: tool_styles[str(tool)]['color'] for tool in unique_tools}
     weekly_start = pd.to_datetime(weekly_start_date) if weekly_start_date is not None else None
     weekly_end = pd.to_datetime(weekly_end_date) if weekly_end_date is not None else None
     has_period_separator = False
@@ -3239,16 +3278,17 @@ def plot_spc_by_tool_group(
         subset = df[df['Matching'] == tool]
         tool_info = tool_shift_info.get(str(tool), {})
         tool_k = pd.to_numeric(pd.Series([tool_info.get('k')]), errors='coerce').iloc[0]
-        show_shift_marker = (
-            pd.notna(tool_k)
-            and np.isfinite(tool_k)
-            and float(tool_k) > 2.0
-        )
         is_shift_tool = tool_info.get('highlight', False)
         if isinstance(is_shift_tool, str):
             is_shift_tool = is_shift_tool.strip().lower() in {'true', '1', 'yes', 'highlight'}
         else:
             is_shift_tool = bool(is_shift_tool)
+        show_shift_marker = (
+            is_shift_tool
+            and pd.notna(tool_k)
+            and np.isfinite(tool_k)
+            and float(tool_k) > 2.0
+        )
 
         # Keep normal tools visually quiet.  Only tools that triggered the
         # by-tool shift rule receive a light-yellow group background.
@@ -3260,35 +3300,17 @@ def plot_spc_by_tool_group(
                 alpha=0.75,
                 zorder=0,
             )
-        max_percentile = str(tool_info.get('max_percentile', '')).upper()
-        triggered_rules = [
-            str(rule).replace('_shift', '').upper()
-            for rule in tool_info.get('triggered_rules', [])
-            if rule
-        ]
-        percentile_rank = {'P05': 0, 'P50': 1, 'P95': 2}
-        triggered_rules.sort(key=lambda name: percentile_rank.get(name, 99))
         # Show K details only when the maximum K actually exceeds the shift
         # threshold.  Labels for normal tools remain just the tool name.
         if show_shift_marker:
-            if len(triggered_rules) == 1:
-                triggered_percentile = triggered_rules[0]
-                triggered_k = pd.to_numeric(
-                    pd.Series([tool_info.get(f'{triggered_percentile.lower()}_k')]),
-                    errors='coerce'
-                ).iloc[0]
-                display_k = triggered_k if pd.notna(triggered_k) and np.isfinite(triggered_k) else tool_k
-                tool_label = f"{tool} ({triggered_percentile} K={display_k:.2f})"
-            elif len(triggered_rules) > 1:
-                tool_label = f"{tool} ({'/'.join(triggered_rules)}, Max K={tool_k:.2f})"
-            elif max_percentile:
-                tool_label = f"{tool} (Max {max_percentile} K={tool_k:.2f})"
-            else:
-                tool_label = f"{tool} (Max K={tool_k:.2f})"
+            tool_label = format_by_tool_shift_label(str(tool), tool_info)
         else:
             tool_label = str(tool)
-        ln, = ax.plot(subset.index, subset['point_val'], marker='o', markersize=4,
-                      color=tool_color_map[tool], label=tool_label, alpha=0.8, zorder=3)
+        alpha = by_tool_plot_alpha(tool_info, shift_comparison_active)
+        ln, = ax.plot(
+            subset.index, subset['point_val'], marker=tool_styles[str(tool)]['marker'], markersize=5,
+            color=tool_color_map[tool], label=tool_label, alpha=alpha, zorder=3
+        )
         artists.append(ln)
         if i > 0:
             ax.axvline(x=subset.index.min() - 0.5, color='gray', linestyle=':', alpha=0.4, zorder=1)

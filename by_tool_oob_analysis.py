@@ -7,6 +7,8 @@ and delegates every K-shift decision to the production calculator.
 
 from __future__ import annotations
 
+import json
+import colorsys
 from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
@@ -18,7 +20,53 @@ NEW_BASELINE_MIN = 10
 BY_TOOL_K_THRESHOLD = 2.0
 WHOLE_BASELINE_K_MAX = 5.0
 PERCENTILES = ("P95", "P50", "P05")
+MIN_BY_TOOL_PLOT_COMPARISON_TOOLS = 2
 KShiftCalculator = Callable[..., Any]
+
+
+def filter_by_tool_plot_data(
+    raw_data: pd.DataFrame,
+    all_tools_json: str | None,
+    matching_column: str = "Matching",
+) -> pd.DataFrame:
+    """Keep only Tools eligible for By Tool Shift when rule details exist."""
+    frame = raw_data.copy()
+    if matching_column not in frame.columns:
+        frame[matching_column] = "Unknown"
+    frame[matching_column] = frame[matching_column].fillna("Unknown").astype(str)
+
+    try:
+        records = json.loads(all_tools_json) if all_tools_json else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return frame
+    if not isinstance(records, list) or not records:
+        return frame
+
+    eligible_tools = {
+        str(item.get("tool", ""))
+        for item in records
+        if isinstance(item, Mapping) and bool(item.get("eligible", False))
+    }
+    # A comparison view needs at least two eligible Tools. With zero or one,
+    # keep the raw By Tool view instead of producing an empty/single-Tool chart.
+    if len(eligible_tools) < MIN_BY_TOOL_PLOT_COMPARISON_TOOLS:
+        return frame
+    return frame[frame[matching_column].isin(eligible_tools)].copy()
+
+
+def has_eligible_by_tool_shift(all_tools_json: str | None) -> bool:
+    """Whether at least two Tools can participate in the plot comparison."""
+    try:
+        records = json.loads(all_tools_json) if all_tools_json else []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(records, list):
+        return False
+    eligible_count = sum(
+        1 for item in records
+        if isinstance(item, Mapping) and bool(item.get("eligible", False))
+    )
+    return eligible_count >= MIN_BY_TOOL_PLOT_COMPARISON_TOOLS
 
 
 def _as_float(value: Any) -> float:
@@ -27,6 +75,56 @@ def _as_float(value: Any) -> float:
     except (TypeError, ValueError):
         return np.nan
     return number if np.isfinite(number) else np.nan
+
+
+def format_by_tool_shift_label(tool: str, tool_info: Mapping[str, Any]) -> str:
+    """Build an unambiguous legend label with a K value for each triggered rule."""
+    percentile_rank = {"P05": 0, "P50": 1, "P95": 2}
+    triggered = [
+        str(rule).replace("_shift", "").upper()
+        for rule in tool_info.get("triggered_rules", [])
+        if rule
+    ]
+    triggered.sort(key=lambda name: percentile_rank.get(name, 99))
+    if not triggered:
+        return str(tool)
+
+    parts = []
+    fallback_k = _as_float(tool_info.get("k"))
+    for percentile in triggered:
+        k_value = _as_float(tool_info.get(f"{percentile.lower()}_k"))
+        if pd.isna(k_value) and len(triggered) == 1:
+            k_value = fallback_k
+        parts.append(f"{percentile}={k_value:.2f}σ" if pd.notna(k_value) else percentile)
+    return f"{tool} ({', '.join(parts)})"
+
+
+def build_by_tool_plot_styles(tools: Iterable[Any]) -> dict[str, dict[str, str]]:
+    """Create stable, non-repeating colors plus markers for large Tool sets."""
+    marker_cycle = ("o", "s", "^", "D", "v", "P", "X", "<", ">", "h")
+    golden_ratio = 0.618033988749895
+    styles = {}
+    for index, tool in enumerate(tools):
+        hue = (0.08 + index * golden_ratio) % 1.0
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.72, 0.82)
+        color = "#{:02x}{:02x}{:02x}".format(
+            round(red * 255), round(green * 255), round(blue * 255)
+        )
+        styles[str(tool)] = {
+            "color": color,
+            "marker": marker_cycle[index % len(marker_cycle)],
+        }
+    return styles
+
+
+def by_tool_plot_alpha(tool_info: Mapping[str, Any] | None, has_shift_details: bool) -> float:
+    """De-emphasize eligible Tools that did not trigger a By Tool Shift alarm."""
+    highlighted = tool_info.get("highlight", False) if tool_info is not None else False
+    if isinstance(highlighted, str):
+        highlighted = highlighted.strip().lower() in {"true", "1", "yes", "highlight"}
+    if bool(highlighted):
+        return 0.95
+    return 0.45 if has_shift_details else 0.8
 
 
 def _values(frame: pd.DataFrame) -> np.ndarray:
@@ -44,10 +142,16 @@ def percentile_values(values: Iterable[float]) -> dict[str, float]:
     return {"P95": float(p95), "P50": float(p50), "P05": float(p05)}
 
 
-def whole_baseline_bounds(baseline_data: pd.DataFrame) -> dict[str, float]:
-    """Calculate Whole Baseline bounds before Matching filtering or borrowing."""
-    stats = percentile_values(_values(baseline_data))
-    return {"P95": stats["P95"], "P05": stats["P05"]}
+def whole_baseline_bounds(
+    baseline_data: pd.DataFrame,
+    min_points: int = 1,
+) -> dict[str, float | int]:
+    """Calculate Whole Baseline bounds when enough comparison points exist."""
+    values = _values(baseline_data)
+    if len(values) < min_points:
+        return {"P95": np.nan, "P05": np.nan, "Count": int(len(values))}
+    stats = percentile_values(values)
+    return {"P95": stats["P95"], "P05": stats["P05"], "Count": int(len(values))}
 
 
 def _result_dict(result: Any) -> dict[str, Any]:
@@ -118,24 +222,34 @@ def apply_whole_baseline_exemption(
             continue
 
         if percentile == "P95":
-            keep = pd.notna(weekly_value) and pd.notna(whole_p95) and weekly_value > whole_p95
-            boundary = f"Whole P95={whole_p95:.8g}"
+            boundary_value = whole_p95
+            keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value > boundary_value
+            boundary = f"Whole P95={boundary_value:.8g}"
         elif percentile == "P05":
-            keep = pd.notna(weekly_value) and pd.notna(whole_p05) and weekly_value < whole_p05
-            boundary = f"Whole P05={whole_p05:.8g}"
+            boundary_value = whole_p05
+            keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value < boundary_value
+            boundary = f"Whole P05={boundary_value:.8g}"
         else:
             signed_k = _as_float(result.get("P50_k_ori"))
             if signed_k > 0:
-                keep = pd.notna(weekly_value) and pd.notna(whole_p95) and weekly_value > whole_p95
-                boundary = f"Whole P95={whole_p95:.8g}"
+                boundary_value = whole_p95
+                keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value > boundary_value
+                boundary = f"Whole P95={boundary_value:.8g}"
             else:
-                keep = pd.notna(weekly_value) and pd.notna(whole_p05) and weekly_value < whole_p05
-                boundary = f"Whole P05={whole_p05:.8g}"
+                boundary_value = whole_p05
+                keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value < boundary_value
+                boundary = f"Whole P05={boundary_value:.8g}"
         if not keep:
             final[shift_key] = "NO_HIGHLIGHT"
-            exemptions.append(
-                f"{percentile}: 2<K<=5, weekly={weekly_value:.8g} did not cross {boundary}"
-            )
+            if pd.isna(boundary_value):
+                exemptions.append(
+                    f"{percentile}: 2<K<=5, peer Whole Baseline has fewer than "
+                    f"{NEW_BASELINE_MIN} points"
+                )
+            else:
+                exemptions.append(
+                    f"{percentile}: 2<K<=5, weekly={weekly_value:.8g} did not cross {boundary}"
+                )
     return final, exemptions, kept_over_5
 
 
@@ -179,6 +293,7 @@ def evaluate_tool_new_rule(
         "Rolling Points Borrowed": int(rolling_required if eligible else 0),
         "Calculation Weekly Count": int(len(calculation_weekly)),
         "Calculation Baseline Count": int(len(calculation_baseline)),
+        "Whole Baseline Count": int(whole_bounds.get("Count", 0)),
         "Whole Baseline P95": _as_float(whole_bounds.get("P95")),
         "Whole Baseline P05": _as_float(whole_bounds.get("P05")),
         "Exemption Reasons": "",
@@ -257,16 +372,25 @@ def evaluate_by_tool_new_rules(
             frame["point_time"] = pd.to_datetime(frame["point_time"], errors="coerce")
             frame.sort_values("point_time", inplace=True)
 
-    bounds = whole_baseline_bounds(baseline)
     baseline_groups = {name: group for name, group in baseline.groupby(matching_column)}
     weekly_groups = {name: group for name, group in weekly.groupby(matching_column)}
+    baseline_values_by_tool = {name: _values(group) for name, group in baseline_groups.items()}
     records = []
     for tool in sorted(set(baseline_groups) | set(weekly_groups)):
-        base_values = _values(baseline_groups.get(tool, pd.DataFrame(columns=["point_val"])))
+        base_values = baseline_values_by_tool.get(tool, np.array([], dtype=float))
         week_values = _values(weekly_groups.get(tool, pd.DataFrame(columns=["point_val"])))
+        peer_parts = [
+            values for peer_tool, values in baseline_values_by_tool.items()
+            if peer_tool != tool and len(values)
+        ]
+        peer_values = np.concatenate(peer_parts) if peer_parts else np.array([], dtype=float)
+        peer_bounds = whole_baseline_bounds(
+            pd.DataFrame({"point_val": peer_values}),
+            min_points=NEW_BASELINE_MIN,
+        )
         records.append(
             evaluate_tool_new_rule(
-                tool, base_values, week_values, bounds, chart_info, kshift_calculator
+                tool, base_values, week_values, peer_bounds, chart_info, kshift_calculator
             )
         )
     return pd.DataFrame(records)
