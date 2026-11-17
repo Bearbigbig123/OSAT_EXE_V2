@@ -1,0 +1,11 @@
+﻿ChartName,DateStart,DateEnd,RawRows,SiteCount,ValidSiteValues,ExpectedPooledMean,ExpectedPooledSigma,ExpectedLongTermCpk,ExpectedPattern
+01_Stable_4Sites,2026-08-01 08:00:00,2026-10-31 08:00:00,92,4,368,100.028685,0.65425,3.042,Stable process; four well-aligned sites
+02_OneSiteHighOffset,2026-08-01 08:00:00,2026-10-31 08:00:00,92,5,460,100.426513,0.936157,1.985,site5 has a persistent positive offset
+03_UpwardDrift_6Sites,2026-08-01 08:00:00,2026-10-31 08:00:00,92,6,552,101.612846,1.134977,1.288,All six sites drift upward across the three-month period
+04_VariationIncrease,2026-08-01 08:00:00,2026-10-31 08:00:00,92,4,368,99.904345,1.138651,2.021,Within-site variation increases gradually over time
+05_IntermittentOutliers,2026-08-01 08:00:00,2026-10-31 08:00:00,92,8,736,50.03901,0.648319,2.037,Mostly stable with intermittent site-level out-of-spec points
+06_SmallerNearUSL,2026-08-01 08:00:00,2026-10-31 08:00:00,92,3,276,6.248775,0.591191,0.987,Smaller-is-better process operating closer to the USL
+07_BiggerOneSiteLow,2026-08-01 08:00:00,2026-10-31 08:00:00,92,5,460,78.798357,2.822379,1.039,Bigger-is-better process with site5 persistently low
+08_ManySites_12,2026-08-01 08:00:00,2026-10-31 08:00:00,92,12,1104,25.007145,0.503172,1.983,Twelve sites with small evenly distributed offsets
+09_MissingSiteReadings,2026-08-01 08:00:00,2026-10-31 08:00:00,92,6,474,199.994403,0.884593,3.012,Six sites with random missing readings; valid cells are pooled
+10_FinalMonthStepChange,2026-08-01 08:00:00,2026-10-31 08:00:00,92,4,368,10.325503,0.518103,0.949,All sites step upward at the start of the final month

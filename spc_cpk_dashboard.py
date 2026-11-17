@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import re
 import pandas as pd
 import numpy as np
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -8,6 +10,53 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import oob_module_NGK_nostatic as oob_module
 from analysis_selection import filter_chart_info_for_analysis, warn_if_no_analysis_selection
+
+SITE_COLUMN_PATTERN = re.compile(r"^site([1-9]\d*)$", re.IGNORECASE)
+
+
+def get_site_columns(df: pd.DataFrame):
+    """Return site1..siteN columns in numeric order (case-insensitive)."""
+    if df is None:
+        return []
+    matched = []
+    for column in df.columns:
+        match = SITE_COLUMN_PATTERN.fullmatch(str(column).strip())
+        if match:
+            matched.append((int(match.group(1)), column))
+    return [column for _, column in sorted(matched, key=lambda item: item[0])]
+
+
+def prepare_cpk_data(raw_df: pd.DataFrame, data_mode: str = "point_val") -> pd.DataFrame:
+    """Normalize either point_val or wide site1..siteN input for Cpk calculations."""
+    base_columns = ['point_time', 'point_val', 'site']
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=base_columns)
+
+    if data_mode == "by_site":
+        site_columns = get_site_columns(raw_df)
+        if not site_columns:
+            return pd.DataFrame(columns=base_columns)
+        id_columns = [column for column in raw_df.columns if column not in site_columns]
+        normalized = raw_df.melt(
+            id_vars=id_columns,
+            value_vars=site_columns,
+            var_name='site',
+            value_name='_site_value',
+        )
+        normalized['point_val'] = pd.to_numeric(normalized['_site_value'], errors='coerce')
+        normalized = normalized.drop(columns=['_site_value'])
+    else:
+        if 'point_val' not in raw_df.columns:
+            return pd.DataFrame(columns=base_columns)
+        normalized = raw_df.copy()
+        normalized['point_val'] = pd.to_numeric(normalized['point_val'], errors='coerce')
+        normalized['site'] = 'point_val'
+
+    normalized = normalized.dropna(subset=['point_val']).copy()
+    if 'point_time' in normalized.columns:
+        normalized['point_time'] = pd.to_datetime(normalized['point_time'], errors='coerce')
+        normalized = normalized.dropna(subset=['point_time'])
+    return normalized
 
 class SlidingToggleSwitch(QtWidgets.QAbstractButton):
     """iOS 風格滑動開關"""
@@ -127,34 +176,22 @@ class DateSettingsDialog(QtWidgets.QDialog):
         )
 
 def calculate_cpk(raw_df, chart_info):
-    print(raw_df)
-    print(f"[DEBUG] chart_info type: {type(chart_info)}")
-    print(f"[DEBUG] chart_info keys: {list(chart_info.keys()) if hasattr(chart_info, 'keys') else chart_info}")
-    print(f"[DEBUG] chart_info: {chart_info}")
-    
     # 檢查數據是否足夠
     if raw_df is None or raw_df.empty or len(raw_df) < 2:
-        print(f"[DEBUG] 數據不足，無法計算 Cpk")
         return {'Cpk': None}
     
     mean = raw_df['point_val'].mean()
-    print(f"[DEBUG] mean: {mean}")
     std = raw_df['point_val'].std()
-    print(f"[DEBUG] std: {std}")
     
     # 引入極小閾值，避免除以接近0的數
     # 使用較大的閾值以避免計算出不合理的超大 Cpk 值
     epsilon = 1e-6
-    if std < epsilon:
-        print(f"[DEBUG] 標準差過小 (std={std} < {epsilon})，數據為定值或變異極小，無法計算 Cpk")
+    if pd.isna(std) or std < epsilon:
         return {'Cpk': None}
     
     characteristic = chart_info['Characteristics']
     usl = chart_info.get('USL', None)
-    print(f"[DEBUG] usl: {usl}")
     lsl = chart_info.get('LSL', None)
-    print(f"[DEBUG] lsl: {lsl}")
-    print(f"[DEBUG] usl: {usl}, lsl: {lsl}, characteristic: {characteristic}")
     cpk = None
     if std > epsilon:  # 再次確認
         characteristic_lower = str(characteristic).lower()
@@ -196,6 +233,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         self.cpk_results = {}  # {(group_name, chart_name): {'Cpk': value}}
         self.chart_date_states = {}  # 每張圖的日期狀態：{'custom': bool, 'start': date, 'end': date}
         self.axis_mode = 'index'  # 'index' (等距) 或 'time'
+        self.settings_path = os.path.join(get_app_dir(), 'input', 'cpk_settings.json')
+        self.data_mode = self._load_data_mode_setting()
         
         # 計算模式設定
         self.is_custom_mode = False  # False: 自動偵測, True: 自訂計算區間
@@ -212,6 +251,51 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         
         self.init_ui()
         TranslationManager().register_observer(self)
+
+    def _load_data_mode_setting(self):
+        try:
+            with open(self.settings_path, 'r', encoding='utf-8') as settings_file:
+                value = json.load(settings_file).get('data_mode', 'point_val')
+                return value if value in {'point_val', 'by_site'} else 'point_val'
+        except (OSError, ValueError, TypeError):
+            return 'point_val'
+
+    def _save_data_mode_setting(self):
+        try:
+            os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
+            with open(self.settings_path, 'w', encoding='utf-8') as settings_file:
+                json.dump({'data_mode': self.data_mode}, settings_file, indent=2)
+        except OSError as exc:
+            print(f"[WARN] Unable to save Cpk settings: {exc}")
+
+    def _prepare_cpk_dataframe(self, raw_df):
+        return prepare_cpk_data(raw_df, self.data_mode)
+
+    def _on_data_mode_changed(self, index):
+        self.data_mode = self.data_mode_combo.itemData(index) or 'point_val'
+        self._save_data_mode_setting()
+        self._update_data_mode_status()
+        self.update_cpk_labels()
+
+    def _update_data_mode_status(self):
+        if not hasattr(self, 'data_mode_status'):
+            return
+        if self.data_mode == 'point_val':
+            self.data_mode_status.setText('Using point_val')
+            self.data_mode_status.setStyleSheet('color: #64748b; font-size: 11px;')
+            return
+        idx = self.chart_combo.currentIndex() if hasattr(self, 'chart_combo') else -1
+        site_columns = []
+        if idx >= 0 and self.all_charts_info is not None and idx < len(self.all_charts_info):
+            info = self.all_charts_info.iloc[idx]
+            raw_df = self.raw_charts_dict.get((str(info['GroupName']), str(info['ChartName'])))
+            site_columns = get_site_columns(raw_df)
+        if site_columns:
+            self.data_mode_status.setText(f"{len(site_columns)} sites: {site_columns[0]} - {site_columns[-1]}")
+            self.data_mode_status.setStyleSheet('color: #047857; font-size: 11px; font-weight: 600;')
+        else:
+            self.data_mode_status.setText('No site1...siteN columns')
+            self.data_mode_status.setStyleSheet('color: #dc2626; font-size: 11px; font-weight: 600;')
 
     def update_paths(self, excel_path, raw_data_dir):
         self.chart_excel_path = excel_path
@@ -331,6 +415,19 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         """)
         self.lbl_chart = QtWidgets.QLabel(tr('chart'))
         self.lbl_chart.setObjectName("plainLabel")
+
+        self.data_mode_label = QtWidgets.QLabel('Cpk Data')
+        self.data_mode_label.setObjectName('plainLabel')
+        self.data_mode_combo = QtWidgets.QComboBox()
+        self.data_mode_combo.addItem('Point Value', 'point_val')
+        self.data_mode_combo.addItem('By Site', 'by_site')
+        selected_mode = self.data_mode_combo.findData(self.data_mode)
+        self.data_mode_combo.setCurrentIndex(max(0, selected_mode))
+        self.data_mode_combo.setFixedHeight(34)
+        self.data_mode_combo.setMinimumWidth(120)
+        self.data_mode_combo.setToolTip('Point Value uses point_val. By Site pools site1...siteN for Cpk.')
+        self.data_mode_status = QtWidgets.QLabel()
+        self.data_mode_status.setMinimumWidth(150)
         
         # 新增設定按鈕
         self.settings_btn = QtWidgets.QPushButton("⚙ " + tr('settings'))
@@ -356,6 +453,9 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         
         top_bar.addWidget(self.lbl_chart)
         top_bar.addWidget(self.chart_combo)
+        top_bar.addWidget(self.data_mode_label)
+        top_bar.addWidget(self.data_mode_combo)
+        top_bar.addWidget(self.data_mode_status)
         top_bar.addWidget(self.settings_btn)
         top_bar.addWidget(self.recalc_btn)
         top_bar.addWidget(self.export_excel_btn)
@@ -500,10 +600,12 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         # 事件連接
         self.recalc_btn.clicked.connect(self.recalculate)
         self.chart_combo.currentIndexChanged.connect(self.update_cpk_labels)
+        self.data_mode_combo.currentIndexChanged.connect(self._on_data_mode_changed)
         self.settings_btn.clicked.connect(self.open_settings_dialog)
         self.export_excel_btn.clicked.connect(self.export_chart_info_excel)
         self.prev_chart_btn.clicked.connect(self.prev_chart)
         self.next_chart_btn.clicked.connect(self.next_chart)
+        self._update_data_mode_status()
         self.apply_theme()
     def export_chart_info_excel(self):
         # 匯出所有 chart 的 group_name@chart_name@characteristics 及 Cpk 指標到 Excel，並加上 debug log
@@ -574,7 +676,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 cpk_last_month = cpk_res.get('Cpk_last_month')
                 cpk_last2_month = cpk_res.get('Cpk_last2_month')
                 if raw_df is not None:
-                    custom_cpk = calculate_cpk(raw_df, chart_info)['Cpk']
+                    export_metric_df = self._prepare_cpk_dataframe(raw_df)
+                    custom_cpk = calculate_cpk(export_metric_df, chart_info)['Cpk'] if not export_metric_df.empty else None
                 # 只有當所有 Cpk 值都有效時才計算衰退率
                 if cpk is not None and cpk_last_month is not None and cpk_last_month != 0 and cpk <= cpk_last_month:
                     r1 = (1 - (cpk / cpk_last_month)) * 100
@@ -596,7 +699,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                         print(f"[MEAN_SIGMA][{group_name}@{chart_name}][{label}] 無資料")
                 # 取得各區間資料（使用等長區間）
                 if raw_df is not None and not raw_df.empty and 'point_time' in raw_df.columns:
-                    raw_df_local = raw_df.copy()
+                    raw_df_local = self._prepare_cpk_dataframe(raw_df)
                     raw_df_local['point_time'] = pd.to_datetime(raw_df_local['point_time'])
                     
                     # 根據模式決定區間
@@ -641,7 +744,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 epsilon = 1e-9
                 if target is not None and usl is not None and lsl is not None:
                     mean_val = None
-                    plot_df = self.raw_charts_dict.get(key)
+                    plot_df = self._prepare_cpk_dataframe(self.raw_charts_dict.get(key))
                     if plot_df is not None and not plot_df.empty:
                         mean_val = plot_df['point_val'].mean()
                     # 檢查 USL-LSL 是否過小（接近0）
@@ -664,7 +767,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             ax.set_title(f"{group_name}@{chart_name}@{characteristics}", pad=18)
             ax.set_xlabel("")
             ax.set_ylabel("")
-            plot_df = self.raw_charts_dict.get(key)
+            plot_df = self._prepare_cpk_dataframe(self.raw_charts_dict.get(key))
             if plot_df is None or plot_df.empty:
                 ax.text(0.5, 0.5, tr('no_data'), ha='center', va='center', transform=ax.transAxes)
             else:
@@ -678,17 +781,25 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                         pass
                 y = plot_df2['point_val'].values
                 # x軸等距模式（與UI一致）
-                x = range(1, len(y) + 1)
+                if self.data_mode == 'by_site' and 'point_time' in plot_df2.columns:
+                    export_times = pd.Index(plot_df2['point_time'].drop_duplicates().sort_values())
+                    export_positions = {time: position + 1 for position, time in enumerate(export_times)}
+                    x = plot_df2['point_time'].map(export_positions).to_numpy()
+                else:
+                    export_times = pd.Index([])
+                    x = range(1, len(y) + 1)
                 # === 在圖上標示「當月/上月/上上月」區間 ===
                 # --- 徹底修正：使用索引百分比來分配底色 ---
                 if 'point_time' in plot_df2.columns and not plot_df2.empty:
                     try:
                         import matplotlib.transforms as mtransforms
-                        n = len(plot_df2)
+                        n = len(export_times) if self.data_mode == 'by_site' and len(export_times) else len(plot_df2)
                         x_min, x_max = 0.5, n + 0.5
                         
                         # 取得數據的時間區間
-                        times = pd.to_datetime(plot_df2['point_time']).to_numpy()
+                        times = (pd.to_datetime(export_times).to_numpy()
+                                 if self.data_mode == 'by_site' and len(export_times)
+                                 else pd.to_datetime(plot_df2['point_time']).to_numpy())
                         t_start, t_end = times.min(), times.max()
                         
                         # 根據模式定義時間界線
@@ -737,7 +848,23 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                     except Exception as e:
                         print(f"[DEBUG] 底色繪製失敗: {e}")
                 # 主數據線
-                ax.plot(x, y, linestyle='-', marker='o', color='#2563eb', markersize=5, linewidth=1.2, label='_nolegend_')
+                if self.data_mode == 'by_site' and 'site' in plot_df2.columns:
+                    site_names = get_site_columns(self.raw_charts_dict.get(key))
+                    export_palette = plt.get_cmap('tab20')
+                    grouped = plot_df2.groupby('point_time', sort=True)['point_val'].agg(['min', 'max', 'median'])
+                    grouped_x = [export_positions[time] for time in grouped.index]
+                    ax.vlines(grouped_x, grouped['min'], grouped['max'], color='#94a3b8', alpha=0.32, linewidth=1)
+                    ax.plot(grouped_x, grouped['median'], color='#0f172a', linewidth=1.7, alpha=0.78, label='Site median')
+                    for site_index, site_name in enumerate(site_names):
+                        site_df = plot_df2[plot_df2['site'] == site_name]
+                        color = export_palette(site_index % 20)
+                        site_x = site_df['point_time'].map(export_positions).to_numpy()
+                        ax.plot(site_x, site_df['point_val'], color=color, linewidth=0.7, alpha=0.28)
+                        ax.scatter(site_x, site_df['point_val'], color=color, s=25, alpha=0.82,
+                                   edgecolors='white', linewidth=0.5, label=site_name, zorder=4)
+                    ax.legend(loc='upper left', fontsize=7, ncol=min(6, max(2, len(site_names) // 3 + 1)))
+                else:
+                    ax.plot(x, y, linestyle='-', marker='o', color='#2563eb', markersize=5, linewidth=1.2, label='_nolegend_')
                 usl = chart_info.get('USL', None)
                 lsl = chart_info.get('LSL', None)
                 target = None
@@ -780,7 +907,15 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 segment_with_label(target, 'Target', '#f59e0b', va='center')
                 # segment_with_label(mean_val, 'Mean', '#16a34a', va='center')
                 # x軸刻度（等距模式顯示日期）
-                if 'point_time' in plot_df2.columns and not plot_df2.empty:
+                if self.data_mode == 'by_site' and len(export_times):
+                    total = len(export_times)
+                    step = max(1, total // 8)
+                    tick_indices = list(range(0, total, step))
+                    if tick_indices[-1] != total - 1:
+                        tick_indices.append(total - 1)
+                    ax.set_xticks([index + 1 for index in tick_indices])
+                    ax.set_xticklabels([export_times[index].strftime('%Y-%m-%d') for index in tick_indices], rotation=90, ha='center', fontsize=8)
+                elif 'point_time' in plot_df2.columns and not plot_df2.empty:
                     times = plot_df2['point_time'].tolist()
                     total = len(times)
                     if total <= 12:
@@ -820,6 +955,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 'SubChart1': '',  # 子圖1佔位
                 'SubChart2': '',  # 子圖2佔位
                 'ChartKey': f"{group_name}@{chart_name}@{characteristics}",
+                'DataMode': 'By Site' if self.data_mode == 'by_site' else 'Point Value',
                 'GroupName': group_name,
                 'ChartName': chart_name,
                 'Characteristics': characteristics,
@@ -990,7 +1126,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
         
         # 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['site', 'Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
         
         if tool_col:
             df_plot = df.copy()
@@ -1051,7 +1187,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return
         
         # 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['site', 'Matching', 'ByTool', 'tool_id', 'Tool', '機台'] if c in df.columns), None)
         
         if tool_col:
             df_plot = df.copy()
@@ -1161,18 +1297,9 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             if raw_path and os.path.exists(raw_path):
                 try:
                     raw_df = pd.read_csv(raw_path)
-                    # 過濾超規點邏輯保持不變
-                    usl = chart_info.get('USL', None)
-                    lsl = chart_info.get('LSL', None)
-                    if usl is not None and lsl is not None:
-                        raw_df = raw_df[(raw_df['point_val'] <= usl) & (raw_df['point_val'] >= lsl)]
-                    elif usl is not None:
-                        raw_df = raw_df[raw_df['point_val'] <= usl]
-                    elif lsl is not None:
-                        raw_df = raw_df[raw_df['point_val'] >= lsl]
-                    
                     self.raw_charts_dict[(g_name, c_name)] = raw_df
-                    quick_cpk = calculate_cpk(raw_df, chart_info)['Cpk']
+                    cpk_df = self._prepare_cpk_dataframe(raw_df)
+                    quick_cpk = calculate_cpk(cpk_df, chart_info)['Cpk'] if not cpk_df.empty else None
                     self.cpk_results[(g_name, c_name)] = {'Cpk': quick_cpk}
                     self.chart_date_states[(g_name, c_name)] = {'custom': False, 'start': None, 'end': None}
                 except Exception as e:
@@ -1234,6 +1361,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
 
     def update_cpk_labels(self):
         """選擇 chart 時：若該 chart 尚未自訂日期 -> 自動用最新往回三個月"""
+        self._update_data_mode_status()
         idx = self.chart_combo.currentIndex()
         for key, comp in self.metric_cards.items():
             comp["value_label"].setText("-")
@@ -1309,11 +1437,14 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         
         # 分段計算 Cpk
         if mask_curr.any():
-            result['Cpk'] = calculate_cpk(df[mask_curr], chart_info)['Cpk']
+            cpk_df = self._prepare_cpk_dataframe(df[mask_curr])
+            result['Cpk'] = calculate_cpk(cpk_df, chart_info)['Cpk'] if not cpk_df.empty else None
         if mask_l1.any():
-            result['Cpk_last_month'] = calculate_cpk(df[mask_l1], chart_info)['Cpk']
+            cpk_df = self._prepare_cpk_dataframe(df[mask_l1])
+            result['Cpk_last_month'] = calculate_cpk(cpk_df, chart_info)['Cpk'] if not cpk_df.empty else None
         if mask_l2.any():
-            result['Cpk_last2_month'] = calculate_cpk(df[mask_l2], chart_info)['Cpk']
+            cpk_df = self._prepare_cpk_dataframe(df[mask_l2])
+            result['Cpk_last2_month'] = calculate_cpk(cpk_df, chart_info)['Cpk'] if not cpk_df.empty else None
             
         return result
 
@@ -1327,7 +1458,9 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             return {'Cpk': None, 'Cpk_last_month': None, 'Cpk_last2_month': None}
         
         if 'point_time' not in raw_df.columns:
-            return {'Cpk': calculate_cpk(raw_df, chart_info)['Cpk'], 'Cpk_last_month': None, 'Cpk_last2_month': None}
+            cpk_df = self._prepare_cpk_dataframe(raw_df)
+            cpk = calculate_cpk(cpk_df, chart_info)['Cpk'] if not cpk_df.empty else None
+            return {'Cpk': cpk, 'Cpk_last_month': None, 'Cpk_last2_month': None}
         
         raw_df_local = raw_df.copy()
         raw_df_local['point_time'] = pd.to_datetime(raw_df_local['point_time'])
@@ -1370,7 +1503,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         cpk_res = self._recompute_cpk_for_chart(chart_info)
         
         # 計算全部資料 Cpk (Long-term Cpk)
-        all_data_cpk = calculate_cpk(raw_df, chart_info)['Cpk']
+        all_cpk_df = self._prepare_cpk_dataframe(raw_df)
+        all_data_cpk = calculate_cpk(all_cpk_df, chart_info)['Cpk'] if not all_cpk_df.empty else None
         
         # 計算 K 參數
         kval = None
@@ -1385,6 +1519,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                     break
             
             mean_val = None
+            metric_df = self._prepare_cpk_dataframe(raw_df)
             if raw_df is not None and not raw_df.empty:
                 # 根據模式決定使用哪段數據的 mean
                 if self.is_custom_mode:
@@ -1392,16 +1527,16 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                     start_time = pd.to_datetime(self.custom_start_date.toPyDate())
                     end_time = pd.to_datetime(self.custom_end_date.toPyDate()) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
                     if 'point_time' in raw_df.columns:
-                        filtered_df = raw_df[(pd.to_datetime(raw_df['point_time']) >= start_time) & 
-                                            (pd.to_datetime(raw_df['point_time']) <= end_time)]
+                        filtered_df = metric_df[(pd.to_datetime(metric_df['point_time']) >= start_time) &
+                                               (pd.to_datetime(metric_df['point_time']) <= end_time)]
                         if not filtered_df.empty:
                             mean_val = filtered_df['point_val'].mean()
                     else:
-                        mean_val = raw_df['point_val'].mean()
+                        mean_val = metric_df['point_val'].mean()
                 else:
                     # 自動模式：使用最近 3 個月的數據
                     if 'point_time' in raw_df.columns:
-                        df_local = raw_df.copy()
+                        df_local = metric_df.copy()
                         df_local['point_time'] = pd.to_datetime(df_local['point_time'])
                         latest = df_local['point_time'].max()
                         start_time = latest - pd.DateOffset(months=3)
@@ -1409,7 +1544,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                         if not filtered_df.empty:
                             mean_val = filtered_df['point_val'].mean()
                     else:
-                        mean_val = raw_df['point_val'].mean()
+                        mean_val = metric_df['point_val'].mean()
             
             # 檢查 USL-LSL 是否過小
             if usl is not None and lsl is not None:
@@ -1479,6 +1614,10 @@ class SPCCpkDashboard(QtWidgets.QWidget):
                 from translations import tr
                 ax.text(0.5, 0.5, tr('no_data'), ha='center', va='center', transform=ax.transAxes)
                 self.canvas.draw()
+                return
+
+            if self.data_mode == 'by_site':
+                self._draw_by_site_chart(ax, raw_df, chart_info, group_name, chart_name)
                 return
             
             plot_df = raw_df.copy()
@@ -1745,6 +1884,144 @@ class SPCCpkDashboard(QtWidgets.QWidget):
             ax.text(0.5, 0.5, f"{tr('chart_error')}\n{str(e)}", ha='center', va='center', transform=ax.transAxes, color='red')
             self.canvas.draw()
 
+    def _draw_by_site_chart(self, ax, raw_df, chart_info, group_name, chart_name):
+        """Draw pooled site measurements with all sites aligned at the same time position."""
+        from translations import tr
+        plot_df = self._prepare_cpk_dataframe(raw_df)
+        if plot_df.empty:
+            ax.text(
+                0.5, 0.5, 'By Site requires columns named site1, site2, ... siteN',
+                ha='center', va='center', transform=ax.transAxes, color='#dc2626', fontsize=11,
+            )
+            ax.set_title(f"{group_name}@{chart_name}@{chart_info.get('Characteristics', '')}", pad=10)
+            self.canvas.draw()
+            self._draw_analysis_plots(plot_df, chart_info, (0.0, 1.0))
+            return
+
+        if 'point_time' in plot_df.columns:
+            plot_df = plot_df.sort_values(['point_time', 'site']).reset_index(drop=True)
+            if self.is_custom_mode:
+                start_time = pd.to_datetime(self.custom_start_date.toPyDate())
+                end_time = pd.to_datetime(self.custom_end_date.toPyDate()) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
+            else:
+                end_time = plot_df['point_time'].max()
+                start_time = end_time - pd.DateOffset(months=3)
+            plot_df = plot_df[(plot_df['point_time'] >= start_time) & (plot_df['point_time'] <= end_time)].copy()
+
+        if plot_df.empty:
+            ax.text(0.5, 0.5, tr('no_data'), ha='center', va='center', transform=ax.transAxes)
+            self.canvas.draw()
+            self._draw_analysis_plots(plot_df, chart_info, (0.0, 1.0))
+            return
+
+        sites = get_site_columns(raw_df)
+        palette = plt.get_cmap('tab20')
+        site_colors = {site: palette(i % 20) for i, site in enumerate(sites)}
+
+        use_time_axis = self.axis_mode == 'time' and 'point_time' in plot_df.columns
+        if 'point_time' in plot_df.columns:
+            unique_times = pd.Index(plot_df['point_time'].drop_duplicates().sort_values())
+            time_positions = {time: index + 1 for index, time in enumerate(unique_times)}
+            plot_df['_x'] = plot_df['point_time'] if use_time_axis else plot_df['point_time'].map(time_positions)
+
+            total_range = end_time - start_time
+            if total_range.total_seconds() > 0:
+                segment = total_range / 3
+                boundaries = [start_time, end_time - 2 * segment, end_time - segment, end_time]
+                window_styles = [('L2', '#ede9fe'), ('L1', '#fef9c3'), ('Current', '#fee2e2')]
+                if use_time_axis:
+                    span_boundaries = boundaries
+                else:
+                    span_boundaries = []
+                    for boundary in boundaries:
+                        position = int(unique_times.searchsorted(boundary, side='left')) + 1
+                        span_boundaries.append(max(0.5, min(len(unique_times) + 0.5, position)))
+                for window_index, (label, color) in enumerate(window_styles):
+                    left, right = span_boundaries[window_index], span_boundaries[window_index + 1]
+                    ax.axvspan(left, right, color=color, alpha=0.22, linewidth=0, zorder=0)
+                    ax.text(left + (right - left) / 2, 0.985, label,
+                            transform=ax.get_xaxis_transform(), ha='center', va='top',
+                            fontsize=8, color='#475569')
+        else:
+            plot_df['_row'] = plot_df.groupby('site').cumcount() + 1
+            plot_df['_x'] = plot_df['_row']
+            unique_times = pd.Index([])
+
+        # A soft vertical range makes the same-time site cluster immediately readable.
+        if 'point_time' in plot_df.columns:
+            ranges = plot_df.groupby('point_time', sort=True)['point_val'].agg(['min', 'max', 'median'])
+            range_x = ranges.index if use_time_axis else [time_positions[t] for t in ranges.index]
+            ax.vlines(range_x, ranges['min'], ranges['max'], color='#94a3b8', alpha=0.32, linewidth=1.0, zorder=1)
+            ax.plot(range_x, ranges['median'], color='#0f172a', linewidth=1.8, alpha=0.78,
+                    label='Site median', zorder=3)
+
+        for site in sites:
+            subset = plot_df[plot_df['site'] == site]
+            if subset.empty:
+                continue
+            color = site_colors[site]
+            ax.plot(subset['_x'], subset['point_val'], color=color, linewidth=0.75, alpha=0.28, zorder=2)
+            ax.scatter(
+                subset['_x'], subset['point_val'], color=color, label=site, s=28,
+                alpha=0.82, edgecolors='white', linewidth=0.55, zorder=4,
+            )
+
+        usl = chart_info.get('USL', None)
+        lsl = chart_info.get('LSL', None)
+        target = next((chart_info[key] for key in ['Target', 'TARGET', 'TargetValue', 'Center']
+                       if key in chart_info and pd.notna(chart_info[key])), None)
+        for value, label, color in [(usl, 'USL', '#dc2626'), (lsl, 'LSL', '#dc2626'), (target, 'Target', '#d97706')]:
+            if value is not None and pd.notna(value):
+                ax.axhline(value, color=color, linestyle='--', linewidth=1.1, alpha=0.9)
+                ax.text(0.995, value, label, transform=ax.get_yaxis_transform(), ha='right', va='bottom',
+                        color=color, fontsize=8, fontweight='bold')
+
+        out_of_spec = pd.Series(False, index=plot_df.index)
+        if usl is not None and pd.notna(usl):
+            out_of_spec |= plot_df['point_val'] > usl
+        if lsl is not None and pd.notna(lsl):
+            out_of_spec |= plot_df['point_val'] < lsl
+        if out_of_spec.any():
+            oos = plot_df[out_of_spec]
+            ax.scatter(oos['_x'], oos['point_val'], facecolors='none', edgecolors='#dc2626',
+                       linewidth=1.4, s=58, zorder=6, label='Out of spec')
+
+        values_for_scale = plot_df['point_val'].tolist()
+        values_for_scale.extend([v for v in [usl, lsl, target] if v is not None and pd.notna(v)])
+        y_min, y_max = min(values_for_scale), max(values_for_scale)
+        y_range = y_max - y_min
+        margin = y_range * 0.12 if y_range > 0 else 1.0
+        shared_ylim = (y_min - margin, y_max + margin)
+        ax.set_ylim(shared_ylim)
+
+        if use_time_axis:
+            import matplotlib.dates as mdates
+            locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        elif len(unique_times):
+            count = len(unique_times)
+            step = max(1, count // 7)
+            tick_indices = list(range(0, count, step))
+            if tick_indices[-1] != count - 1:
+                tick_indices.append(count - 1)
+            ax.set_xticks([index + 1 for index in tick_indices])
+            ax.set_xticklabels([unique_times[index].strftime('%Y-%m-%d') for index in tick_indices], fontsize=8)
+
+        ax.set_title(
+            f"{group_name}@{chart_name}@{chart_info.get('Characteristics', '')} | By Site ({len(sites)} sites)",
+            pad=10,
+        )
+        ax.set_ylabel('Measurement')
+        ax.grid(True, axis='y', linestyle=':', linewidth=0.7, alpha=0.45)
+        ax.set_axisbelow(True)
+        legend_columns = min(6, max(2, len(sites) // 3 + 1))
+        ax.legend(loc='upper left', fontsize=7, ncol=legend_columns, frameon=True,
+                  framealpha=0.92, edgecolor='#e2e8f0')
+        self.figure.subplots_adjust(top=0.88, bottom=0.13, left=0.08, right=0.97)
+        self.canvas.draw()
+        self._draw_analysis_plots(plot_df, chart_info, shared_ylim)
+
     def _draw_analysis_plots(self, df, chart_info, shared_ylim):
         """
         優化版：下方兩張小圖獨立 Scale，不再受大圖的 USL/LSL 限制而縮小
@@ -1757,7 +2034,8 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         self.fig_sub3.clear()
 
         # 1. 自動偵測 Tool 欄位
-        tool_col = next((c for c in ['Matching', 'ByTool', 'tool_id', '機台'] if c in df.columns), None)
+        tool_col = next((c for c in ['site', 'Matching', 'ByTool', 'tool_id', '機台'] if c in df.columns), None)
+        category_name = 'Site' if tool_col == 'site' else 'Tool'
         # 統一顏色調色盤 (與大圖分色邏輯一致)
         colors = ['#2563eb', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed']
 
@@ -1781,7 +2059,7 @@ class SPCCpkDashboard(QtWidgets.QWidget):
 
                 # --- 圖 2: Boxplot ---
                 ax2 = self.fig_sub2.add_subplot(111)
-                ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
+                ax2.set_title(f"{category_name} Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
                 
                 data_to_plot = [df_plot[df_plot[tool_col] == t]['point_val'].values for t in tools]
                 
@@ -1830,14 +2108,14 @@ class SPCCpkDashboard(QtWidgets.QWidget):
         else:
             # 若無 Tool 資訊，兩張圖都只顯示文字提示
             ax2 = self.fig_sub2.add_subplot(111)
-            ax2.set_title("Tool Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
-            ax2.text(0.5, 0.5, "No Tool Info", ha='center', va='center', transform=ax2.transAxes, fontsize=12)
+            ax2.set_title(f"{category_name} Variation (Boxplot)", fontsize=10, fontweight='bold', pad=10)
+            ax2.text(0.5, 0.5, f"No {category_name} Info", ha='center', va='center', transform=ax2.transAxes, fontsize=12)
             ax2.set_xticks([])
             ax2.set_yticks([])
             
             ax3 = self.fig_sub3.add_subplot(111)
             ax3.set_title("Normal Probability Plot", fontsize=10, fontweight='bold', pad=10)
-            ax3.text(0.5, 0.5, "No Tool Info", ha='center', va='center', transform=ax3.transAxes, fontsize=12)
+            ax3.text(0.5, 0.5, f"No {category_name} Info", ha='center', va='center', transform=ax3.transAxes, fontsize=12)
             ax3.set_xticks([])
             ax3.set_yticks([])
 
