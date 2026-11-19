@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import colorsys
+import copy
+import inspect
 from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
@@ -20,8 +22,136 @@ NEW_BASELINE_MIN = 10
 BY_TOOL_K_THRESHOLD = 2.0
 WHOLE_BASELINE_K_MAX = 5.0
 PERCENTILES = ("P95", "P50", "P05")
+PROFILE_VERSION = 1
 MIN_BY_TOOL_PLOT_COMPARISON_TOOLS = 2
 KShiftCalculator = Callable[..., Any]
+
+
+CURRENT_BY_TOOL_PERCENTILE_PROFILE = {
+    "version": PROFILE_VERSION,
+    "characteristics": {
+        "Nominal": {
+            "P95": {"weekly": 95, "k_base": 95, "own_enabled": True, "own_low": None, "own_high": 95, "peer_low": None, "peer_high": 95},
+            "P50": {"weekly": 50, "k_base": 50, "own_enabled": True, "own_low": 25, "own_high": 75, "peer_low": 5, "peer_high": 95},
+            "P05": {"weekly": 5, "k_base": 5, "own_enabled": True, "own_low": 5, "own_high": None, "peer_low": 5, "peer_high": None},
+        },
+        "Bigger": {
+            "P95": {"weekly": 95, "k_base": 95, "own_enabled": True, "own_low": 5, "own_high": None, "peer_low": None, "peer_high": 95},
+            "P50": {"weekly": 50, "k_base": 50, "own_enabled": True, "own_low": 25, "own_high": None, "peer_low": 5, "peer_high": 95},
+            "P05": {"weekly": 5, "k_base": 5, "own_enabled": False, "own_low": 5, "own_high": None, "peer_low": 5, "peer_high": None},
+        },
+        "Smaller": {
+            "P95": {"weekly": 95, "k_base": 95, "own_enabled": False, "own_low": None, "own_high": 95, "peer_low": None, "peer_high": 95},
+            "P50": {"weekly": 50, "k_base": 50, "own_enabled": True, "own_low": None, "own_high": 75, "peer_low": 5, "peer_high": 95},
+            "P05": {"weekly": 5, "k_base": 5, "own_enabled": True, "own_low": None, "own_high": 95, "peer_low": 5, "peer_high": None},
+        },
+    },
+}
+
+
+def default_by_tool_percentile_profile() -> dict[str, Any]:
+    return copy.deepcopy(CURRENT_BY_TOOL_PERCENTILE_PROFILE)
+
+
+def _valid_percentile(value: Any, fallback: Any) -> int | None:
+    if value is None and fallback is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if 0 <= number <= 100 else fallback
+
+
+def normalize_by_tool_percentile_profile(profile: Any) -> dict[str, Any]:
+    """Return a complete v1 profile, replacing invalid/missing fields with current defaults."""
+    normalized = default_by_tool_percentile_profile()
+    if isinstance(profile, str):
+        try:
+            profile = json.loads(profile)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return normalized
+    if not isinstance(profile, Mapping) or profile.get("version") != PROFILE_VERSION:
+        return normalized
+    source_characteristics = profile.get("characteristics")
+    if not isinstance(source_characteristics, Mapping):
+        return normalized
+    for characteristic in ("Nominal", "Bigger", "Smaller"):
+        source_rules = source_characteristics.get(characteristic)
+        if not isinstance(source_rules, Mapping):
+            continue
+        for slot in PERCENTILES:
+            source_rule = source_rules.get(slot)
+            if not isinstance(source_rule, Mapping):
+                continue
+            target = normalized["characteristics"][characteristic][slot]
+            for key in ("weekly", "k_base", "own_low", "own_high", "peer_low", "peer_high"):
+                target[key] = _valid_percentile(source_rule.get(key), target[key])
+            target["own_enabled"] = bool(source_rule.get("own_enabled", target["own_enabled"]))
+    return normalized
+
+
+def characteristic_profile(profile: Any, characteristic: Any) -> dict[str, Any]:
+    normalized = normalize_by_tool_percentile_profile(profile)
+    name = str(characteristic or "Nominal").strip().title()
+    if name == "Sigma":
+        name = "Smaller"
+    if name not in normalized["characteristics"]:
+        name = "Nominal"
+    return normalized["characteristics"][name]
+
+
+def percentile_label(value: Any) -> str:
+    return f"P{int(value):02d}" if value is not None else "Off"
+
+
+def _number_label(value: Any) -> str:
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def by_tool_rule_formula(
+    slot: str,
+    rule: Mapping[str, Any],
+    characteristic: str,
+    k_threshold: float = BY_TOOL_K_THRESHOLD,
+    peer_bypass_k: float = WHOLE_BASELINE_K_MAX,
+) -> str:
+    weekly = percentile_label(rule.get("weekly"))
+    k_base = percentile_label(rule.get("k_base"))
+    if not rule.get("own_enabled", True):
+        gate = "Gate Off"
+    elif characteristic == "Nominal" and slot == "P50":
+        gate = f"outside Base {percentile_label(rule.get('own_low'))}-{percentile_label(rule.get('own_high'))}"
+    elif characteristic == "Bigger":
+        gate = f"< Base {percentile_label(rule.get('own_low'))}"
+    elif characteristic in {"Smaller", "Sigma"}:
+        gate = f"> Base {percentile_label(rule.get('own_high'))}"
+    elif slot == "P95":
+        gate = f"> Base {percentile_label(rule.get('own_high'))}"
+    else:
+        gate = f"< Base {percentile_label(rule.get('own_low'))}"
+    if slot == "P95":
+        peer_gate = f"> Whole {percentile_label(rule.get('peer_high'))}"
+    elif slot == "P05":
+        peer_gate = f"< Whole {percentile_label(rule.get('peer_low'))}"
+    else:
+        peer_gate = (
+            f"outside Whole {percentile_label(rule.get('peer_low'))}-"
+            f"{percentile_label(rule.get('peer_high'))}"
+        )
+    return (
+        f"W:{weekly} vs K-Base:{k_base}; K>{_number_label(k_threshold)}; Own:{gate}; "
+        f"Peer(K<={_number_label(peer_bypass_k)}):{peer_gate}"
+    )
+
+
+def percentile_at(values: Iterable[float], percentile: Any) -> float:
+    if percentile is None:
+        return np.nan
+    array = np.asarray(list(values) if not isinstance(values, np.ndarray) else values, dtype=float)
+    array = array[np.isfinite(array)]
+    return float(np.percentile(array, int(percentile))) if len(array) else np.nan
 
 
 def filter_by_tool_plot_data(
@@ -91,11 +221,14 @@ def format_by_tool_shift_label(tool: str, tool_info: Mapping[str, Any]) -> str:
 
     parts = []
     fallback_k = _as_float(tool_info.get("k"))
+    formulas = tool_info.get("rule_formulas", {})
     for percentile in triggered:
         k_value = _as_float(tool_info.get(f"{percentile.lower()}_k"))
         if pd.isna(k_value) and len(triggered) == 1:
             k_value = fallback_k
-        parts.append(f"{percentile}={k_value:.2f}σ" if pd.notna(k_value) else percentile)
+        formula = formulas.get(percentile) if isinstance(formulas, Mapping) else None
+        name = f"{percentile}[{formula}]" if formula else percentile
+        parts.append(f"{name}={k_value:.2f}σ" if pd.notna(k_value) else name)
     return f"{tool} ({', '.join(parts)})"
 
 
@@ -145,13 +278,21 @@ def percentile_values(values: Iterable[float]) -> dict[str, float]:
 def whole_baseline_bounds(
     baseline_data: pd.DataFrame,
     min_points: int = 1,
+    requested_percentiles: Iterable[int] = (5, 95),
 ) -> dict[str, float | int]:
     """Calculate Whole Baseline bounds when enough comparison points exist."""
     values = _values(baseline_data)
     if len(values) < min_points:
-        return {"P95": np.nan, "P05": np.nan, "Count": int(len(values))}
-    stats = percentile_values(values)
-    return {"P95": stats["P95"], "P05": stats["P05"], "Count": int(len(values))}
+        percentiles = {str(int(q)): np.nan for q in requested_percentiles if q is not None}
+        return {"P95": np.nan, "P05": np.nan, "Count": int(len(values)), "percentiles": percentiles}
+    requested = {5, 95, *(int(q) for q in requested_percentiles if q is not None)}
+    percentiles = {str(q): percentile_at(values, q) for q in sorted(requested)}
+    return {
+        "P95": percentiles["95"],
+        "P05": percentiles["5"],
+        "Count": int(len(values)),
+        "percentiles": percentiles,
+    }
 
 
 def _result_dict(result: Any) -> dict[str, Any]:
@@ -182,23 +323,39 @@ def call_production_kshift(
         "mean": float(np.mean(weekly_values)),
         "sigma": float(np.std(weekly_values, ddof=1)) if len(weekly_values) > 1 else 0.0,
     }
-    return _result_dict(
-        kshift_calculator(
-            base_stats,
-            weekly_stats,
-            chart_info.get("Characteristics"),
-            chart_info.get("Resolution"),
-            chart_info.get("UCL"),
-            chart_info.get("LCL"),
-            k_threshold=BY_TOOL_K_THRESHOLD,
+    k_threshold = float(chart_info.get("by_tool_median_shift_k_threshold", BY_TOOL_K_THRESHOLD))
+    kwargs = {"k_threshold": k_threshold}
+    try:
+        signature = inspect.signature(kshift_calculator)
+        accepts_profile = (
+            "rule_profile" in signature.parameters
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
         )
-    )
+    except (TypeError, ValueError):
+        accepts_profile = False
+    if accepts_profile:
+        kwargs["rule_profile"] = characteristic_profile(
+            chart_info.get("by_tool_percentile_profile"),
+            chart_info.get("Characteristics"),
+        )
+    return _result_dict(kshift_calculator(
+        base_stats,
+        weekly_stats,
+        chart_info.get("Characteristics"),
+        chart_info.get("Resolution"),
+        chart_info.get("UCL"),
+        chart_info.get("LCL"),
+        **kwargs,
+    ))
 
 
 def apply_whole_baseline_exemption(
     result: Mapping[str, Any],
     weekly_percentiles: Mapping[str, float],
     whole_bounds: Mapping[str, float],
+    rule_profile: Mapping[str, Any] | None = None,
+    k_threshold: float = BY_TOOL_K_THRESHOLD,
+    peer_bypass_k: float = WHOLE_BASELINE_K_MAX,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Apply the current per-percentile Whole Baseline gate."""
     final = dict(result)
@@ -206,6 +363,17 @@ def apply_whole_baseline_exemption(
     kept_over_5: list[str] = []
     whole_p95 = _as_float(whole_bounds.get("P95"))
     whole_p05 = _as_float(whole_bounds.get("P05"))
+    peer_percentiles = whole_bounds.get("percentiles", {})
+    active_profile = rule_profile or CURRENT_BY_TOOL_PERCENTILE_PROFILE["characteristics"]["Nominal"]
+
+    def peer_value(percentile: Any, legacy_value: float) -> float:
+        if percentile is None:
+            return np.nan
+        if isinstance(peer_percentiles, Mapping):
+            value = _as_float(peer_percentiles.get(str(int(percentile))))
+            if pd.notna(value):
+                return value
+        return legacy_value if int(percentile) in {5, 95} else np.nan
 
     for percentile in PERCENTILES:
         shift_key = f"{percentile}_shift"
@@ -214,41 +382,48 @@ def apply_whole_baseline_exemption(
             continue
         k_value = abs(_as_float(result.get(f"{percentile}_k")))
         weekly_value = _as_float(weekly_percentiles.get(percentile))
-        if pd.isna(k_value) or k_value <= BY_TOOL_K_THRESHOLD:
+        if pd.isna(k_value) or k_value <= k_threshold:
             final[shift_key] = "NO_HIGHLIGHT"
             continue
-        if k_value > WHOLE_BASELINE_K_MAX:
+        if k_value > peer_bypass_k:
             kept_over_5.append(shift_key)
             continue
 
+        rule = active_profile[percentile]
         if percentile == "P95":
-            boundary_value = whole_p95
+            boundary_q = rule.get("peer_high")
+            boundary_value = peer_value(boundary_q, whole_p95)
             keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value > boundary_value
-            boundary = f"Whole P95={boundary_value:.8g}"
+            boundary = f"Whole {percentile_label(boundary_q)}={boundary_value:.8g}"
         elif percentile == "P05":
-            boundary_value = whole_p05
+            boundary_q = rule.get("peer_low")
+            boundary_value = peer_value(boundary_q, whole_p05)
             keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value < boundary_value
-            boundary = f"Whole P05={boundary_value:.8g}"
+            boundary = f"Whole {percentile_label(boundary_q)}={boundary_value:.8g}"
         else:
             signed_k = _as_float(result.get("P50_k_ori"))
             if signed_k > 0:
-                boundary_value = whole_p95
+                boundary_q = rule.get("peer_high")
+                boundary_value = peer_value(boundary_q, whole_p95)
                 keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value > boundary_value
-                boundary = f"Whole P95={boundary_value:.8g}"
+                boundary = f"Whole {percentile_label(boundary_q)}={boundary_value:.8g}"
             else:
-                boundary_value = whole_p05
+                boundary_q = rule.get("peer_low")
+                boundary_value = peer_value(boundary_q, whole_p05)
                 keep = pd.notna(weekly_value) and pd.notna(boundary_value) and weekly_value < boundary_value
-                boundary = f"Whole P05={boundary_value:.8g}"
+                boundary = f"Whole {percentile_label(boundary_q)}={boundary_value:.8g}"
         if not keep:
             final[shift_key] = "NO_HIGHLIGHT"
             if pd.isna(boundary_value):
                 exemptions.append(
-                    f"{percentile}: 2<K<=5, peer Whole Baseline has fewer than "
+                    f"{percentile}: {_number_label(k_threshold)}<K<={_number_label(peer_bypass_k)}, "
+                    f"peer Whole Baseline has fewer than "
                     f"{NEW_BASELINE_MIN} points"
                 )
             else:
                 exemptions.append(
-                    f"{percentile}: 2<K<=5, weekly={weekly_value:.8g} did not cross {boundary}"
+                    f"{percentile}: {_number_label(k_threshold)}<K<={_number_label(peer_bypass_k)}, "
+                    f"weekly={weekly_value:.8g} did not cross {boundary}"
                 )
     return final, exemptions, kept_over_5
 
@@ -280,8 +455,22 @@ def evaluate_tool_new_rule(
         calculation_baseline = baseline_values
         calculation_weekly = weekly_values
 
-    baseline_pct = percentile_values(calculation_baseline)
-    weekly_pct = percentile_values(calculation_weekly)
+    characteristic_name = str(chart_info.get("Characteristics", "Nominal") or "Nominal").title()
+    active_profile = characteristic_profile(
+        chart_info.get("by_tool_percentile_profile"), characteristic_name
+    )
+    k_threshold = float(chart_info.get("by_tool_median_shift_k_threshold", BY_TOOL_K_THRESHOLD))
+    peer_bypass_k = float(
+        chart_info.get("by_tool_peer_gate_bypass_k_threshold", WHOLE_BASELINE_K_MAX)
+    )
+    baseline_pct = {
+        slot: percentile_at(calculation_baseline, active_profile[slot]["k_base"])
+        for slot in PERCENTILES
+    }
+    weekly_pct = {
+        slot: percentile_at(calculation_weekly, active_profile[slot]["weekly"])
+        for slot in PERCENTILES
+    }
     row: dict[str, Any] = {
         "Tool": str(tool),
         "Characteristic": chart_info.get("Characteristics", "N/A"),
@@ -298,6 +487,14 @@ def evaluate_tool_new_rule(
         "Whole Baseline P05": _as_float(whole_bounds.get("P05")),
         "Exemption Reasons": "",
         "K > 5 Kept Rules": "",
+        "Rule Formulas": {
+            slot: by_tool_rule_formula(
+                slot, active_profile[slot], characteristic_name, k_threshold, peer_bypass_k
+            )
+            for slot in PERCENTILES
+        },
+        "K Alarm Threshold": k_threshold,
+        "K Peer Bypass Threshold": peer_bypass_k,
     }
     for percentile in PERCENTILES:
         row[f"Baseline {percentile}"] = baseline_pct[percentile]
@@ -329,7 +526,8 @@ def evaluate_tool_new_rule(
         )
 
     final, exemptions, kept_over_5 = apply_whole_baseline_exemption(
-        rolled_result, weekly_pct, whole_bounds
+        rolled_result, weekly_pct, whole_bounds, active_profile,
+        k_threshold=k_threshold, peer_bypass_k=peer_bypass_k,
     )
     triggered = []
     for percentile in PERCENTILES:
@@ -375,6 +573,15 @@ def evaluate_by_tool_new_rules(
     baseline_groups = {name: group for name, group in baseline.groupby(matching_column)}
     weekly_groups = {name: group for name, group in weekly.groupby(matching_column)}
     baseline_values_by_tool = {name: _values(group) for name, group in baseline_groups.items()}
+    active_profile = characteristic_profile(
+        chart_info.get("by_tool_percentile_profile"), chart_info.get("Characteristics")
+    )
+    requested_peer_percentiles = {
+        rule[key]
+        for rule in active_profile.values()
+        for key in ("peer_low", "peer_high")
+        if rule.get(key) is not None
+    }
     records = []
     for tool in sorted(set(baseline_groups) | set(weekly_groups)):
         base_values = baseline_values_by_tool.get(tool, np.array([], dtype=float))
@@ -387,6 +594,7 @@ def evaluate_by_tool_new_rules(
         peer_bounds = whole_baseline_bounds(
             pd.DataFrame({"point_val": peer_values}),
             min_points=NEW_BASELINE_MIN,
+            requested_percentiles=requested_peer_percentiles,
         )
         records.append(
             evaluate_tool_new_rule(

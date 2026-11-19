@@ -8,11 +8,14 @@ from by_tool_oob_analysis import (
     apply_whole_baseline_exemption,
     build_by_tool_plot_styles,
     by_tool_plot_alpha,
+    characteristic_profile,
+    default_by_tool_percentile_profile,
     evaluate_by_tool_new_rules,
     evaluate_tool_new_rule,
     filter_by_tool_plot_data,
     format_by_tool_shift_label,
     has_eligible_by_tool_shift,
+    normalize_by_tool_percentile_profile,
 )
 
 
@@ -107,6 +110,41 @@ class CurrentByToolRuleTests(unittest.TestCase):
             )
             self.assertEqual(final["P50_shift"], expected)
 
+    def test_custom_alarm_and_peer_bypass_k_thresholds(self):
+        weekly = {"P95": 1.0, "P50": 1.0, "P05": -1.0}
+        peer_blocked, _, _ = apply_whole_baseline_exemption(
+            result_for(k=4.0, rules=("P50",)), weekly, self.bounds,
+            k_threshold=3.0, peer_bypass_k=5.0,
+        )
+        bypassed, _, bypassed_rules = apply_whole_baseline_exemption(
+            result_for(k=4.0, rules=("P50",)), weekly, self.bounds,
+            k_threshold=3.0, peer_bypass_k=3.5,
+        )
+        below_alarm, _, _ = apply_whole_baseline_exemption(
+            result_for(k=2.5, rules=("P50",)), weekly, self.bounds,
+            k_threshold=3.0, peer_bypass_k=5.0,
+        )
+
+        self.assertEqual(peer_blocked["P50_shift"], "NO_HIGHLIGHT")
+        self.assertEqual(bypassed["P50_shift"], "HIGHLIGHT")
+        self.assertEqual(bypassed_rules, ["P50_shift"])
+        self.assertEqual(below_alarm["P50_shift"], "NO_HIGHLIGHT")
+
+    def test_chart_alarm_k_threshold_is_forwarded_to_calculator(self):
+        received = []
+
+        def capture_threshold(base, data, characteristic, resolution, ucl, lcl,
+                              k_threshold=1.67, rule_profile=None):
+            received.append(k_threshold)
+            return pd.Series(result_for(k=0, rules=()))
+
+        chart = dict(self.chart, by_tool_median_shift_k_threshold=3.25)
+        evaluate_tool_new_rule(
+            "A", np.arange(10, dtype=float), np.arange(5, dtype=float),
+            self.bounds, chart, capture_threshold,
+        )
+        self.assertEqual(received, [3.25])
+
     def test_missing_peer_baseline_blocks_k_up_to_5(self):
         final, exemptions, _ = apply_whole_baseline_exemption(
             result_for(k=3.0, rules=("P50",)),
@@ -143,6 +181,98 @@ class CurrentByToolRuleTests(unittest.TestCase):
     def test_production_calculator_accepts_k_threshold(self):
         from oob_module_NGK_nostatic import kshift_sigma_ratio_calculator
         self.assertIn("k_threshold", inspect.signature(kshift_sigma_ratio_calculator).parameters)
+        self.assertIn("rule_profile", inspect.signature(kshift_sigma_ratio_calculator).parameters)
+
+    def test_current_default_profile_keeps_legacy_characteristic_rules(self):
+        profile = default_by_tool_percentile_profile()
+        nominal = profile["characteristics"]["Nominal"]
+        bigger = profile["characteristics"]["Bigger"]
+        smaller = profile["characteristics"]["Smaller"]
+
+        self.assertEqual((nominal["P50"]["own_low"], nominal["P50"]["own_high"]), (25, 75))
+        self.assertEqual((bigger["P95"]["own_low"], bigger["P95"]["peer_high"]), (5, 95))
+        self.assertFalse(bigger["P05"]["own_enabled"])
+        self.assertFalse(smaller["P95"]["own_enabled"])
+        self.assertEqual(smaller["P05"]["own_high"], 95)
+        self.assertEqual(characteristic_profile(profile, "Sigma"), smaller)
+
+    def test_invalid_or_future_profile_resets_to_current_default(self):
+        expected = default_by_tool_percentile_profile()
+        self.assertEqual(normalize_by_tool_percentile_profile("not json"), expected)
+        self.assertEqual(normalize_by_tool_percentile_profile({"version": 999}), expected)
+
+    def test_custom_peer_percentile_changes_whole_baseline_gate(self):
+        profile = default_by_tool_percentile_profile()
+        rule = profile["characteristics"]["Nominal"]["P50"]
+        rule["peer_high"] = 75
+        weekly = {"P95": 1.0, "P50": 1.0, "P05": -1.0}
+        whole = {
+            "P95": 10.0,
+            "P05": -10.0,
+            "percentiles": {"5": -10.0, "75": 0.5, "95": 10.0},
+        }
+
+        default_result, _, _ = apply_whole_baseline_exemption(
+            result_for(k=3.0, rules=("P50",)), weekly, whole
+        )
+        custom_result, _, _ = apply_whole_baseline_exemption(
+            result_for(k=3.0, rules=("P50",)), weekly, whole,
+            characteristic_profile(profile, "Nominal"),
+        )
+
+        self.assertEqual(default_result["P50_shift"], "NO_HIGHLIGHT")
+        self.assertEqual(custom_result["P50_shift"], "HIGHLIGHT")
+
+    def test_custom_own_gate_percentiles_are_used(self):
+        from oob_module_NGK_nostatic import review_kshift_results
+
+        profile = default_by_tool_percentile_profile()
+        rule = profile["characteristics"]["Nominal"]["P50"]
+        rule.update({"weekly": 80, "k_base": 60, "own_low": 20, "own_high": 70})
+        results = result_for(k=3.0, rules=("P50",), signed_p50=3.0)
+        weekly_percentiles = {"Q80": 90.0}
+        baseline_percentiles = {"Q60": 50.0, "Q20": 20.0, "Q70": 80.0}
+
+        highlights = review_kshift_results(
+            results, 0.01, "Nominal", weekly_percentiles, baseline_percentiles,
+            k_threshold=2.0, rule_profile=characteristic_profile(profile, "Nominal"),
+        )
+
+        self.assertEqual(highlights["P50_shift"], "HIGHLIGHT")
+
+    def test_current_default_review_matches_legacy_rules(self):
+        from oob_module_NGK_nostatic import (
+            _legacy_review_kshift_results,
+            review_kshift_results,
+        )
+
+        baseline = {
+            "P05": 5.0, "P25": 25.0, "P50": 50.0, "P75": 75.0, "P95": 95.0,
+            "Q5": 5.0, "Q25": 25.0, "Q50": 50.0, "Q75": 75.0, "Q95": 95.0,
+        }
+        scenarios = (
+            ("Nominal", {"P05": 0.0, "P50": 90.0, "P95": 100.0}, (-3.0, 3.0, -3.0)),
+            ("Bigger", {"P05": 0.0, "P50": 10.0, "P95": 0.0}, (-3.0, -3.0, -3.0)),
+            ("Smaller", {"P05": 100.0, "P50": 90.0, "P95": 100.0}, (3.0, 3.0, 3.0)),
+            ("Sigma", {"P05": 100.0, "P50": 90.0, "P95": 100.0}, (3.0, 3.0, 3.0)),
+        )
+        for characteristic, weekly, signed_values in scenarios:
+            weekly_with_q = dict(weekly)
+            weekly_with_q.update({f"Q{int(key[1:])}": value for key, value in weekly.items()})
+            results = {}
+            for slot, signed in zip(("P95", "P50", "P05"), signed_values):
+                results[f"{slot}_k"] = abs(signed)
+                results[f"{slot}_k_ori"] = signed
+            with self.subTest(characteristic=characteristic):
+                legacy = _legacy_review_kshift_results(
+                    results, 0.01, characteristic, weekly_with_q, baseline, k_threshold=2.0
+                )
+                configured = review_kshift_results(
+                    results, 0.01, characteristic, weekly_with_q, baseline,
+                    k_threshold=2.0,
+                    rule_profile=characteristic_profile(None, characteristic),
+                )
+                self.assertEqual(configured, legacy)
 
     def test_by_tool_plot_excludes_ineligible_tools(self):
         frame = pd.DataFrame({
@@ -198,6 +328,14 @@ class CurrentByToolRuleTests(unittest.TestCase):
         })
         self.assertEqual(label, "Tool01 (P05=5.45σ, P50=3.20σ)")
         self.assertNotIn("Max", label)
+
+    def test_legend_shows_configured_formula_without_changing_rule_id(self):
+        label = format_by_tool_shift_label("Tool01", {
+            "triggered_rules": ["P50_shift"],
+            "p50_k": 3.2,
+            "rule_formulas": {"P50": "W:P80 vs K-Base:P60; outside Base P20-P70"},
+        })
+        self.assertIn("P50[W:P80 vs K-Base:P60; outside Base P20-P70]", label)
 
     def test_non_alarm_diagnostic_k_does_not_show_max_label(self):
         label = format_by_tool_shift_label("Tool01", {

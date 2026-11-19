@@ -18,10 +18,15 @@ from analysis_selection import filter_chart_info_for_analysis, get_selected_anal
 from by_tool_oob_analysis import (
     build_by_tool_plot_styles,
     by_tool_plot_alpha,
+    by_tool_rule_formula,
+    characteristic_profile,
+    default_by_tool_percentile_profile,
     evaluate_by_tool_new_rules,
     filter_by_tool_plot_data,
     format_by_tool_shift_label,
     has_eligible_by_tool_shift,
+    normalize_by_tool_percentile_profile,
+    percentile_at,
 )
 # Excel 和圖片處理
 from openpyxl import Workbook
@@ -243,8 +248,8 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         from translations import tr
         
         self.setWindowTitle(tr("chart_processing_settings"))
-        self.setMinimumWidth(760)
-        self.setMinimumHeight(440)
+        self.setMinimumWidth(1180)
+        self.setMinimumHeight(720)
         
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setSpacing(15)
@@ -285,16 +290,33 @@ class OOBSettingsDialog(QtWidgets.QDialog):
 
         k_threshold_layout = QHBoxLayout()
         k_threshold_layout.setSpacing(10)
-        self.by_tool_median_shift_k_label = QLabel(tr("by_tool_median_shift_k_threshold", "Tool Shift K Threshold:"))
-        self.by_tool_median_shift_k_label.setMinimumWidth(150)
-        self.by_tool_median_shift_k_combo = QtWidgets.QComboBox()
-        self.by_tool_median_shift_k_combo.addItems(["2"])
-        self.by_tool_median_shift_k_combo.setCurrentText("2")
-        self.by_tool_median_shift_k_combo.setFixedWidth(100)
-        self.by_tool_median_shift_k_combo.setEnabled(False)
-        self.run_by_tool_median_shift_checkbox.stateChanged.connect(self.by_tool_median_shift_k_combo.setEnabled)
+        self.by_tool_median_shift_k_label = QLabel("Alarm K Threshold (K >)")
+        self.by_tool_median_shift_k_spin = QtWidgets.QDoubleSpinBox()
+        self.by_tool_median_shift_k_spin.setRange(0.01, 100.0)
+        self.by_tool_median_shift_k_spin.setDecimals(2)
+        self.by_tool_median_shift_k_spin.setSingleStep(0.1)
+        self.by_tool_median_shift_k_spin.setValue(2.0)
+        self.by_tool_median_shift_k_spin.setFixedWidth(100)
+        self.by_tool_median_shift_k_spin.setEnabled(False)
+        self.by_tool_peer_bypass_k_label = QLabel("Peer Gate Bypass (K >)")
+        self.by_tool_peer_bypass_k_spin = QtWidgets.QDoubleSpinBox()
+        self.by_tool_peer_bypass_k_spin.setRange(0.01, 100.0)
+        self.by_tool_peer_bypass_k_spin.setDecimals(2)
+        self.by_tool_peer_bypass_k_spin.setSingleStep(0.1)
+        self.by_tool_peer_bypass_k_spin.setValue(5.0)
+        self.by_tool_peer_bypass_k_spin.setFixedWidth(100)
+        self.by_tool_peer_bypass_k_spin.setEnabled(False)
+        self.run_by_tool_median_shift_checkbox.stateChanged.connect(self.by_tool_median_shift_k_spin.setEnabled)
+        self.run_by_tool_median_shift_checkbox.stateChanged.connect(self.by_tool_peer_bypass_k_spin.setEnabled)
+        self.by_tool_median_shift_k_spin.valueChanged.connect(self._sync_k_threshold_constraints)
+        self.by_tool_median_shift_k_spin.valueChanged.connect(self._refresh_percentile_formula_previews)
+        self.by_tool_peer_bypass_k_spin.valueChanged.connect(self._refresh_percentile_formula_previews)
+        self._sync_k_threshold_constraints()
         k_threshold_layout.addWidget(self.by_tool_median_shift_k_label)
-        k_threshold_layout.addWidget(self.by_tool_median_shift_k_combo)
+        k_threshold_layout.addWidget(self.by_tool_median_shift_k_spin)
+        k_threshold_layout.addSpacing(20)
+        k_threshold_layout.addWidget(self.by_tool_peer_bypass_k_label)
+        k_threshold_layout.addWidget(self.by_tool_peer_bypass_k_spin)
         k_threshold_layout.addStretch()
         tool_layout.addLayout(k_threshold_layout)
 
@@ -417,6 +439,9 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.last_month_btn.clicked.connect(self._set_last_month_range)
         
         main_layout.addWidget(self.time_range_group)
+
+        self.percentile_settings_group = self._build_percentile_settings_group()
+        main_layout.addWidget(self.percentile_settings_group)
         
         # 按鈕
         button_layout = QHBoxLayout()
@@ -434,6 +459,126 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         button_layout.addWidget(self.ok_btn)
         
         main_layout.addLayout(button_layout)
+
+    def _build_percentile_settings_group(self):
+        group = QtWidgets.QGroupBox("By Tool Shift Percentile Profile")
+        layout = QtWidgets.QVBoxLayout(group)
+        hint = QtWidgets.QLabel(
+            "Global settings. Sigma uses Smaller. Rule IDs stay P95/P50/P05 for report compatibility; "
+            "the formula preview shows the actual configured percentiles."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        layout.addWidget(hint)
+
+        self.percentile_tabs = QtWidgets.QTabWidget()
+        self.percentile_controls = {}
+        headers = ["Rule", "Weekly", "K Base", "Own Gate", "Own Low", "Own High", "Peer Low", "Peer High", "Formula"]
+        defaults = default_by_tool_percentile_profile()["characteristics"]
+        for characteristic in ("Nominal", "Bigger", "Smaller"):
+            table = QtWidgets.QTableWidget(3, len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.verticalHeader().setVisible(False)
+            table.setAlternatingRowColors(True)
+            table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+            table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            table.setMinimumHeight(175)
+            self.percentile_controls[characteristic] = {}
+            for row_index, slot in enumerate(("P95", "P50", "P05")):
+                rule_item = QtWidgets.QTableWidgetItem(
+                    {"P95": "Upper (P95)", "P50": "Center (P50)", "P05": "Lower (P05)"}[slot]
+                )
+                rule_item.setFlags(rule_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                table.setItem(row_index, 0, rule_item)
+                rule_controls = {}
+                default_rule = defaults[characteristic][slot]
+                for column_index, key in enumerate(("weekly", "k_base", "own_low", "own_high", "peer_low", "peer_high"), start=1):
+                    if column_index == 3:
+                        column_index = 4
+                    elif column_index >= 4:
+                        column_index += 1
+                    spin = QtWidgets.QSpinBox()
+                    spin.setRange(0, 100)
+                    spin.setPrefix("P")
+                    value = default_rule.get(key)
+                    spin.setValue(int(value or 0))
+                    spin.setEnabled(value is not None)
+                    spin.valueChanged.connect(self._refresh_percentile_formula_previews)
+                    table.setCellWidget(row_index, column_index, spin)
+                    rule_controls[key] = spin
+                gate = QtWidgets.QCheckBox("On")
+                gate.setChecked(default_rule["own_enabled"])
+                gate.toggled.connect(self._refresh_percentile_formula_previews)
+                table.setCellWidget(row_index, 3, gate)
+                rule_controls["own_enabled"] = gate
+                formula = QtWidgets.QLabel()
+                formula.setWordWrap(True)
+                formula.setStyleSheet("color: #334155; font-size: 10px;")
+                table.setCellWidget(row_index, 8, formula)
+                rule_controls["formula"] = formula
+                self.percentile_controls[characteristic][slot] = rule_controls
+            self.percentile_tabs.addTab(table, characteristic)
+        layout.addWidget(self.percentile_tabs)
+
+        reset_row = QtWidgets.QHBoxLayout()
+        reset_row.addStretch()
+        self.reset_percentile_profile_btn = QtWidgets.QPushButton("Reset to Current Default")
+        self.reset_percentile_profile_btn.clicked.connect(self._reset_by_tool_rule_settings)
+        reset_row.addWidget(self.reset_percentile_profile_btn)
+        layout.addLayout(reset_row)
+        self._refresh_percentile_formula_previews()
+        return group
+
+    def _profile_rule_from_controls(self, characteristic, slot):
+        controls = self.percentile_controls[characteristic][slot]
+        default_rule = default_by_tool_percentile_profile()["characteristics"][characteristic][slot]
+        rule = {"own_enabled": controls["own_enabled"].isChecked()}
+        for key in ("weekly", "k_base", "own_low", "own_high", "peer_low", "peer_high"):
+            rule[key] = controls[key].value() if default_rule[key] is not None else None
+        return rule
+
+    def _get_percentile_profile(self):
+        profile = default_by_tool_percentile_profile()
+        for characteristic in ("Nominal", "Bigger", "Smaller"):
+            for slot in ("P95", "P50", "P05"):
+                profile["characteristics"][characteristic][slot] = self._profile_rule_from_controls(characteristic, slot)
+        return normalize_by_tool_percentile_profile(profile)
+
+    def _set_percentile_profile(self, profile):
+        normalized = normalize_by_tool_percentile_profile(profile)
+        for characteristic in ("Nominal", "Bigger", "Smaller"):
+            for slot in ("P95", "P50", "P05"):
+                controls = self.percentile_controls[characteristic][slot]
+                rule = normalized["characteristics"][characteristic][slot]
+                controls["own_enabled"].setChecked(rule["own_enabled"])
+                for key in ("weekly", "k_base", "own_low", "own_high", "peer_low", "peer_high"):
+                    if rule[key] is not None:
+                        controls[key].setValue(int(rule[key]))
+        self._refresh_percentile_formula_previews()
+
+    def _refresh_percentile_formula_previews(self, *_args):
+        if not hasattr(self, "percentile_controls"):
+            return
+        for characteristic in ("Nominal", "Bigger", "Smaller"):
+            for slot in ("P95", "P50", "P05"):
+                controls = self.percentile_controls[characteristic][slot]
+                rule = self._profile_rule_from_controls(characteristic, slot)
+                formula = by_tool_rule_formula(
+                    slot, rule, characteristic,
+                    self.by_tool_median_shift_k_spin.value(),
+                    self.by_tool_peer_bypass_k_spin.value(),
+                )
+                controls["formula"].setText(formula)
+
+    def _sync_k_threshold_constraints(self, *_args):
+        alarm_threshold = self.by_tool_median_shift_k_spin.value()
+        self.by_tool_peer_bypass_k_spin.setMinimum(alarm_threshold)
+
+    def _reset_by_tool_rule_settings(self):
+        self.by_tool_median_shift_k_spin.setValue(2.0)
+        self.by_tool_peer_bypass_k_spin.setValue(5.0)
+        self._set_percentile_profile(default_by_tool_percentile_profile())
     
     def _toggle_time_range_controls(self, checked):
         """ 啟用/停用時間範圍控制 """
@@ -475,7 +620,9 @@ class OOBSettingsDialog(QtWidgets.QDialog):
             'show_charts_gui': self.display_gui_checkbox.isChecked(),
             'show_by_tool_charts': self.show_by_tool_checkbox.isChecked(),
             'run_by_tool_median_shift': self.run_by_tool_median_shift_checkbox.isChecked(),
-            'by_tool_median_shift_k_threshold': float(self.by_tool_median_shift_k_combo.currentText()),
+            'by_tool_median_shift_k_threshold': self.by_tool_median_shift_k_spin.value(),
+            'by_tool_peer_gate_bypass_k_threshold': self.by_tool_peer_bypass_k_spin.value(),
+            'by_tool_percentile_profile': self._get_percentile_profile(),
             'use_interactive_charts': self.interactive_charts_checkbox.isChecked(),
             'use_batch_id_labels': self.use_batch_id_labels_checkbox.isChecked(),
             'custom_time_range_enabled': self.custom_time_range_checkbox.isChecked(),
@@ -492,11 +639,16 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         if 'run_by_tool_median_shift' in settings:
             self.run_by_tool_median_shift_checkbox.setChecked(settings['run_by_tool_median_shift'])
         if 'by_tool_median_shift_k_threshold' in settings:
-            k_value = str(settings.get('by_tool_median_shift_k_threshold', 2))
-            if k_value.endswith('.0'):
-                k_value = k_value[:-2]
-            if self.by_tool_median_shift_k_combo.findText(k_value) >= 0:
-                self.by_tool_median_shift_k_combo.setCurrentText(k_value)
+            self.by_tool_median_shift_k_spin.setValue(float(
+                settings.get('by_tool_median_shift_k_threshold', 2.0)
+            ))
+        self.by_tool_peer_bypass_k_spin.setValue(float(
+            settings.get('by_tool_peer_gate_bypass_k_threshold', 5.0)
+        ))
+        self._sync_k_threshold_constraints()
+        self._set_percentile_profile(settings.get(
+            'by_tool_percentile_profile', default_by_tool_percentile_profile()
+        ))
         if 'use_interactive_charts' in settings:
             self.interactive_charts_checkbox.setChecked(settings['use_interactive_charts'])
         if 'use_batch_id_labels' in settings:
@@ -528,7 +680,8 @@ class OOBSettingsDialog(QtWidgets.QDialog):
         self.display_gui_checkbox.setText(tr("show_charts_gui"))
         self.show_by_tool_checkbox.setText(tr("show_by_tool_charts"))
         self.run_by_tool_median_shift_checkbox.setText(tr("run_by_tool_median_shift", "Run Tool P05/P50/P95 Shift"))
-        self.by_tool_median_shift_k_label.setText(tr("by_tool_median_shift_k_threshold", "Tool Shift K Threshold:"))
+        self.by_tool_median_shift_k_label.setText("Alarm K Threshold (K >)")
+        self.by_tool_peer_bypass_k_label.setText("Peer Gate Bypass (K >)")
         self.interactive_charts_checkbox.setText(tr("use_interactive_charts"))
         self.use_batch_id_labels_checkbox.setText(tr("use_batch_id_labels"))
         self.custom_time_range_checkbox.setText(tr("enable_custom_time_range"))
@@ -998,7 +1151,7 @@ def record_high_low_calculator(current_week_data, historical_data):
             'record_high_low_display': 'None (High=0, Low=0, Total=0)',
             'highlight_status': 'NO_HIGHLIGHT'
         }
-def review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles,
+def _legacy_review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles,
                           k_threshold=1.67):
     # 設定 highlight 的初始值
     highlight_conditions = {key: 'NO_HIGHLIGHT' for key in ['P95_shift', 'P50_shift', 'P05_shift']}
@@ -1088,6 +1241,66 @@ def review_kshift_results(results, resolution, characteristic, data_percentiles,
     return highlight_conditions
 
 
+def review_kshift_results(results, resolution, characteristic, data_percentiles, base_percentiles,
+                          k_threshold=1.67, rule_profile=None):
+    """Apply K, resolution, direction, and configurable Tool Baseline percentile gates."""
+    slots = ('P95', 'P50', 'P05')
+    highlight_conditions = {f'{slot}_shift': 'NO_HIGHLIGHT' for slot in slots}
+    active_profile = rule_profile or characteristic_profile(None, characteristic)
+    characteristic_name = str(characteristic or 'Nominal').title()
+    if characteristic_name == 'Sigma':
+        characteristic_name = 'Smaller'
+
+    def value_at(percentiles, q):
+        if q is None:
+            return np.nan
+        for key in (f'Q{int(q)}', f'P{int(q):02d}', f'P{int(q)}'):
+            value = percentiles.get(key, np.nan)
+            if not pd.isna(value):
+                return float(value)
+        return np.nan
+
+    has_resolution = resolution is not None and not pd.isna(resolution) and resolution > 0
+    for slot in slots:
+        rule = active_profile[slot]
+        weekly_value = value_at(data_percentiles, rule['weekly'])
+        k_base_value = value_at(base_percentiles, rule['k_base'])
+        k_value = results.get(f'{slot}_k', np.nan)
+        signed_k = results.get(f'{slot}_k_ori', np.nan)
+        abs_diff = abs(weekly_value - k_base_value) if pd.notna(weekly_value) and pd.notna(k_base_value) else np.nan
+        significant_diff = pd.notna(abs_diff) and (abs_diff >= resolution if has_resolution else True)
+        significant_k = pd.notna(k_value) and (abs(k_value) > float(k_threshold) or np.isinf(abs(k_value)))
+        if not (significant_diff and significant_k):
+            continue
+
+        if characteristic_name == 'Bigger' and (pd.isna(signed_k) or signed_k >= 0):
+            continue
+        if characteristic_name == 'Smaller' and (pd.isna(signed_k) or signed_k <= 0):
+            continue
+        if characteristic_name == 'Nominal':
+            if slot == 'P95' and (pd.isna(signed_k) or signed_k <= 0):
+                continue
+            if slot == 'P05' and (pd.isna(signed_k) or signed_k >= 0):
+                continue
+
+        if rule.get('own_enabled', True):
+            low = value_at(base_percentiles, rule.get('own_low'))
+            high = value_at(base_percentiles, rule.get('own_high'))
+            if characteristic_name == 'Bigger':
+                gate_passed = pd.notna(low) and weekly_value < low
+            elif characteristic_name == 'Smaller':
+                gate_passed = pd.notna(high) and weekly_value > high
+            elif slot == 'P50':
+                gate_passed = pd.notna(low) and pd.notna(high) and not (low <= weekly_value <= high)
+            elif slot == 'P95':
+                gate_passed = pd.notna(high) and weekly_value > high
+            else:
+                gate_passed = pd.notna(low) and weekly_value < low
+            if not gate_passed:
+                continue
+        highlight_conditions[f'{slot}_shift'] = 'HIGHLIGHT'
+    return highlight_conditions
+
 
 def safe_division(numerator, denominator, epsilon=1e-9):
     """
@@ -1101,7 +1314,7 @@ def safe_division(numerator, denominator, epsilon=1e-9):
 
 
 def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, lcl,
-                                  k_threshold=1.67):
+                                  k_threshold=1.67, rule_profile=None):
     print = oob_calc_print
     """
     計算 K-shift 和 Sigma 比例相關指標，並判斷高亮狀態。
@@ -1132,6 +1345,18 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
 
     data_values = data['values']
     base_values = base['values']
+    active_profile = rule_profile or characteristic_profile(None, characteristic)
+
+    def add_requested_percentiles(stats, values, fields):
+        for rule in active_profile.values():
+            for field_name in fields:
+                q = rule.get(field_name)
+                if q is not None:
+                    stats[f'Q{int(q)}'] = percentile_at(values, q)
+        return stats
+
+    def configured_value(stats, q):
+        return stats.get(f'Q{int(q)}', np.nan)
 
     data_cnt = len(data_values)
     base_cnt = len(base_values) # 也獲取基線數據長度
@@ -1147,6 +1372,10 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
     # 計算基線百分位數。請確保 get_percentiles 能處理 base_cnt = 3 的情況
     try:
         base_percentiles = get_percentiles(base_values)
+        add_requested_percentiles(
+            base_percentiles, base_values,
+            ('k_base', 'own_low', 'own_high', 'peer_low', 'peer_high')
+        )
         print(f"  kshift: 計算出的 base_percentiles (部分): P05={base_percentiles.get('P05')}, P50={base_percentiles.get('P50')}, P95={base_percentiles.get('P95')}")
         # 檢查計算分母所需的關鍵百分位數是否存在且不是 NaN
         if np.isnan(base_percentiles.get('P99.865', np.nan)) or np.isnan(base_percentiles.get('P0.135', np.nan)) or np.isnan(base_percentiles.get('P50', np.nan)):
@@ -1218,9 +1447,11 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
         # 計算百分位數 (使用原始單點數據和滾動/填充後的數據)
         try:
             data_percentiles = get_percentiles(data_values) # 這是用原始單點週數據算的
+            add_requested_percentiles(data_percentiles, data_values, ('weekly',))
             print(f"  kshift: 原始週數據 percentiles (data_cnt=1): {data_percentiles}")
 
             rolled_data_percentiles = get_percentiles(rolled_data_values) # 這是用滾動後的數據算的
+            add_requested_percentiles(rolled_data_percentiles, rolled_data_values, ('weekly',))
             print(f"  kshift: 滾動數據 percentiles (shape={rolled_data_values.shape}): {rolled_data_percentiles}")
 
             rolled_data = {'values': rolled_data_values, 'percentiles': rolled_data_percentiles}
@@ -1243,6 +1474,7 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
         print(f"  kshift: 處理 data_cnt >= 2 分支, data_cnt: {data_cnt}")
         try:
              data_percentiles = get_percentiles(data_values)
+             add_requested_percentiles(data_percentiles, data_values, ('weekly',))
              print(f"  kshift: 當前週數據 percentiles (data_cnt>1): {data_percentiles}")
              # 檢查計算K值所需的當前百分位數是否存在且非NaN
              for p in ['P95', 'P50', 'P05']:
@@ -1344,15 +1576,14 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
 
     # --- 計算 K 值 ---
     try:
-        # 計算 K 值 (原始) - 使用安全除法
-        results['P95_k_ori'] = safe_division(np.round(data_percentiles.get('P95', np.nan) - base_percentiles.get('P95', np.nan), 8), p95k_deno)
-        results['P50_k_ori'] = safe_division(np.round(data_percentiles.get('P50', np.nan) - base_percentiles.get('P50', np.nan), 8), p50k_deno)
-        results['P05_k_ori'] = safe_division(np.round(data_percentiles.get('P05', np.nan) - base_percentiles.get('P05', np.nan), 8), p05k_deno)
-
-        # 計算 K 值 (絕對值) - 使用安全除法
-        results['P95_k'] = safe_division(np.round(abs(data_percentiles.get('P95', np.nan) - base_percentiles.get('P95', np.nan)), 8), p95k_deno)
-        results['P50_k'] = safe_division(np.round(abs(data_percentiles.get('P50', np.nan) - base_percentiles.get('P50', np.nan)), 8), p50k_deno)
-        results['P05_k'] = safe_division(np.round(abs(data_percentiles.get('P05', np.nan) - base_percentiles.get('P05', np.nan)), 8), p05k_deno)
+        denominators_by_slot = {'P95': p95k_deno, 'P50': p50k_deno, 'P05': p05k_deno}
+        for slot, denominator in denominators_by_slot.items():
+            rule = active_profile[slot]
+            weekly_value = configured_value(data_percentiles, rule['weekly'])
+            base_value = configured_value(base_percentiles, rule['k_base'])
+            signed_difference = np.round(weekly_value - base_value, 8)
+            results[f'{slot}_k_ori'] = safe_division(signed_difference, denominator)
+            results[f'{slot}_k'] = safe_division(abs(signed_difference), denominator)
 
         print(f"  kshift: 計算出的 K 值結果: {results}")
 
@@ -1367,7 +1598,7 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
         # 確保傳給 review_kshift_results 的 percentiles 字典是完整的
         current_highlight_conditions = review_kshift_results(
             results, resolution, characteristic, data_percentiles, base_percentiles,
-            k_threshold=k_threshold
+            k_threshold=k_threshold, rule_profile=active_profile
         )
         print(f"  kshift: current_highlight_conditions: {current_highlight_conditions}")
     except Exception as e:
@@ -1385,14 +1616,14 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
         print(f"  kshift: 滾動後 base_percentiles: {base_percentiles}")
         try:
             # 計算滾動結果 (K 值) - 使用安全除法
-            rolling_results = {
-                'P95_k': safe_division(np.round(abs(rolled_data['percentiles'].get('P95', np.nan) - base_percentiles.get('P95', np.nan)), 8), p95k_deno),
-                'P50_k': safe_division(np.round(abs(rolled_data['percentiles'].get('P50', np.nan) - base_percentiles.get('P50', np.nan)), 8), p50k_deno),
-                'P05_k': safe_division(np.round(abs(rolled_data['percentiles'].get('P05', np.nan) - base_percentiles.get('P05', np.nan)), 8), p05k_deno),
-                'P95_k_ori': safe_division(np.round((rolled_data['percentiles'].get('P95', np.nan) - base_percentiles.get('P95', np.nan)), 8), p95k_deno),
-                'P50_k_ori': safe_division(np.round((rolled_data['percentiles'].get('P50', np.nan) - base_percentiles.get('P50', np.nan)), 8), p50k_deno),
-                'P05_k_ori': safe_division(np.round((rolled_data['percentiles'].get('P05', np.nan) - base_percentiles.get('P05', np.nan)), 8), p05k_deno),
-            }
+            rolling_results = {}
+            for slot, denominator in denominators_by_slot.items():
+                rule = active_profile[slot]
+                weekly_value = configured_value(rolled_data['percentiles'], rule['weekly'])
+                base_value = configured_value(base_percentiles, rule['k_base'])
+                signed_difference = np.round(weekly_value - base_value, 8)
+                rolling_results[f'{slot}_k_ori'] = safe_division(signed_difference, denominator)
+                rolling_results[f'{slot}_k'] = safe_division(abs(signed_difference), denominator)
             print(f"  kshift: 計算出的 rolling_results: {rolling_results}")
 
             # 判斷滾動結果高亮條件
@@ -1400,7 +1631,7 @@ def kshift_sigma_ratio_calculator(base, data, characteristic, resolution, ucl, l
             rolling_highlight_conditions = review_kshift_results(
                 rolling_results, resolution, characteristic,
                 rolled_data['percentiles'], base_percentiles,
-                k_threshold=k_threshold
+                k_threshold=k_threshold, rule_profile=active_profile
             )
             print(f"  kshift: rolling_highlight_conditions: {rolling_highlight_conditions}")
 
@@ -2153,8 +2384,11 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
                 'eligible': bool(row['Eligible']),
                 'highlight': row['Highlight'] == 'HIGHLIGHT',
                 'triggered_rules': triggered_rules,
+                'rule_formulas': row.get('Rule Formulas', {}),
                 'exemption_reasons': row.get('Exemption Reasons', ''),
                 'k_gt_5_kept_rules': [v for v in str(row.get('K > 5 Kept Rules', '')).split(', ') if v],
+                'alarm_k_threshold': row.get('K Alarm Threshold', 2.0),
+                'peer_gate_bypass_k_threshold': row.get('K Peer Bypass Threshold', 5.0),
                 'whole_baseline_count': int(row.get('Whole Baseline Count', 0)),
                 'whole_baseline_p95': row.get('Whole Baseline P95'),
                 'whole_baseline_p05': row.get('Whole Baseline P05'),
@@ -2183,8 +2417,17 @@ def by_tool_median_shift_calculator(raw_df, baseline_data, weekly_data, chart_in
         max_k = max_record['k'] if max_record['k'] is not None else np.nan
 
         shifted_records = [item for item in tool_records if item['highlight']]
+        def triggered_rule_text(item):
+            parts = []
+            formulas = item.get('rule_formulas', {})
+            for rule_id in item['triggered_rules']:
+                slot = rule_id.removesuffix('_shift')
+                formula = formulas.get(slot) if isinstance(formulas, dict) else None
+                parts.append(f"{rule_id}[{formula}]" if formula else rule_id)
+            return '+'.join(parts)
+
         top_tools = ', '.join(
-            f"{item['tool']}({'+'.join(item['triggered_rules'])}, K={item['k']:.2f}, Diff={item['diff']:.6g})"
+            f"{item['tool']}({triggered_rule_text(item)}, K={item['k']:.2f}, Diff={item['diff']:.6g})"
             for item in shifted_records
         ) if shifted_records else 'N/A'
         all_tools_json = json.dumps(tool_records, ensure_ascii=False)
@@ -4018,6 +4261,17 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             self.oob_settings["by_tool_median_shift_k_threshold"],
             type=float
         )
+        self.oob_settings["by_tool_peer_gate_bypass_k_threshold"] = self.user_settings.value(
+            "oob/by_tool_peer_gate_bypass_k_threshold",
+            self.oob_settings["by_tool_peer_gate_bypass_k_threshold"],
+            type=float
+        )
+        saved_percentile_profile = self.user_settings.value("oob/by_tool_percentile_profile_v1")
+        self.oob_settings["by_tool_percentile_profile"] = normalize_by_tool_percentile_profile(
+            saved_percentile_profile
+            if saved_percentile_profile
+            else self.oob_settings.get("by_tool_percentile_profile")
+        )
         for key in ("start_time", "end_time"):
             saved_value = self.user_settings.value(f"oob/{key}")
             if saved_value:
@@ -4027,6 +4281,12 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
 
     def _save_oob_user_settings(self):
         for key, value in self.oob_settings.items():
+            if key == "by_tool_percentile_profile":
+                self.user_settings.setValue(
+                    "oob/by_tool_percentile_profile_v1",
+                    json.dumps(normalize_by_tool_percentile_profile(value), ensure_ascii=False),
+                )
+                continue
             if isinstance(value, QtCore.QDateTime):
                 value = value.toString(QtCore.Qt.DateFormat.ISODate)
             self.user_settings.setValue(f"oob/{key}", value)
@@ -4391,6 +4651,8 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             'show_by_tool_charts': False,
             'run_by_tool_median_shift': False,
             'by_tool_median_shift_k_threshold': 2,
+            'by_tool_peer_gate_bypass_k_threshold': 5,
+            'by_tool_percentile_profile': default_by_tool_percentile_profile(),
             'use_interactive_charts': True,
             'use_batch_id_labels': False,
             'custom_time_range_enabled': False,
@@ -6182,6 +6444,13 @@ class SPCApp(QtWidgets.QMainWindow): # 將 QTabWidget 改為 QMainWindow
             chart_info['by_tool_median_shift_k_threshold'] = self.oob_settings.get(
                 'by_tool_median_shift_k_threshold',
                 2
+            )
+            chart_info['by_tool_percentile_profile'] = normalize_by_tool_percentile_profile(
+                self.oob_settings.get('by_tool_percentile_profile')
+            )
+            chart_info['by_tool_peer_gate_bypass_k_threshold'] = self.oob_settings.get(
+                'by_tool_peer_gate_bypass_k_threshold',
+                5
             )
             chart_info['run_by_tool_median_shift'] = self.oob_settings.get(
                 'run_by_tool_median_shift',
