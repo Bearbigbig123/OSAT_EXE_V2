@@ -100,6 +100,11 @@ Nominal 預設：
 
 Peer Gate 使用「其他 Tools 的 Baseline」，不包含目前正在判斷的 Tool。
 
+設定畫面的「考慮 By Tool 大盤（其他 Tools）」可控制是否使用 Peer Gate：
+
+- 開啟（預設）：Alarm 需再通過其他 Tools 的整體 Baseline 確認；K 超過大盤略過門檻時可直接略過。
+- 關閉：不計算其他 Tools 的整體 Baseline，只保留該 Tool 自身 Baseline、K、Resolution 與方向判斷。
+
 - Upper 使用 Peer High，Weekly 必須高於 Whole Baseline 的指定 percentile。
 - Lower 使用 Peer Low，Weekly 必須低於 Whole Baseline 的指定 percentile。
 - Center 依偏移方向使用 Peer Low 或 Peer High，必須落在 Peer 區間外。

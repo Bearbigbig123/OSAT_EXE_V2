@@ -154,6 +154,79 @@ class CurrentByToolRuleTests(unittest.TestCase):
         self.assertEqual(final["P50_shift"], "NO_HIGHLIGHT")
         self.assertIn("fewer than 10 points", exemptions[0])
 
+    def test_market_switch_off_skips_peer_gate(self):
+        final, exemptions, bypassed = apply_whole_baseline_exemption(
+            result_for(k=3.0, rules=("P50",)),
+            {"P95": 1.0, "P50": 1.0, "P05": -1.0},
+            self.bounds,
+            use_peer_gate=False,
+        )
+        self.assertEqual(final["P50_shift"], "HIGHLIGHT")
+        self.assertEqual(exemptions, [])
+        self.assertEqual(bypassed, [])
+
+    def test_market_switch_off_skips_peer_baseline_calculation(self):
+        baseline = pd.DataFrame({
+            "Matching": ["A"] * 10 + ["B"] * 10,
+            "point_val": [0.0] * 10 + [10.0] * 10,
+        })
+        weekly = pd.DataFrame({"Matching": ["A"] * 5, "point_val": [1.0] * 5})
+        chart = dict(self.chart, by_tool_use_peer_baseline=False)
+        detail = evaluate_by_tool_new_rules(
+            baseline, weekly, chart, stub(result_for(k=3.0, rules=("P50",)))
+        )
+        row = detail.loc[detail["Tool"] == "A"].iloc[0]
+        self.assertEqual(row["P50 HL"], "HIGHLIGHT")
+        self.assertEqual(row["Whole Baseline Count"], 0)
+        self.assertIn("Peer:Off", row["Rule Formulas"]["P50"])
+
+    def test_no_alarm_reason_identifies_k_gate(self):
+        row = evaluate_tool_new_rule(
+            "A", np.arange(10, dtype=float), np.ones(5),
+            self.bounds, self.chart, stub(result_for(k=1.5, rules=())),
+        )
+        self.assertIn("K=1.5", row["P50 No Alarm Reason"])
+        self.assertIn("未超過門檻", row["P50 No Alarm Reason"])
+
+    def test_no_alarm_reason_identifies_missing_market_data(self):
+        row = evaluate_tool_new_rule(
+            "A", np.arange(10, dtype=float), np.ones(5),
+            {"P95": np.nan, "P05": np.nan, "Count": 0},
+            self.chart, stub(result_for(k=3.0, rules=("P50",))),
+        )
+        self.assertIn("大盤資料不足", row["P50 No Alarm Reason"])
+
+    def test_alarm_rule_has_no_no_alarm_reason(self):
+        chart = dict(self.chart, by_tool_use_peer_baseline=False)
+        row = evaluate_tool_new_rule(
+            "A", np.arange(10, dtype=float), np.ones(5),
+            self.bounds, chart, stub(result_for(k=3.0, rules=("P50",))),
+        )
+        self.assertEqual(row["P50 HL"], "HIGHLIGHT")
+        self.assertEqual(row["P50 No Alarm Reason"], "")
+
+    def test_excel_export_writes_readable_diagnostic_column(self):
+        import tempfile
+        from pathlib import Path
+        from openpyxl import load_workbook
+        from oob_module_NGK_nostatic import save_results_to_excel
+
+        diagnostic = "ToolA | P95: K=1.2 未超過門檻 2; P50: ALARM; P05: 大盤資料不足"
+        frame = pd.DataFrame([{
+            "group_name": "G", "chart_name": "C",
+            "chart_path": "N/A", "weekly_chart_path": "N/A",
+            "by_tool_color_path": "N/A", "by_tool_group_path": "N/A",
+            "by_tool_shift_diagnostics": diagnostic,
+        }])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "diagnostic.xlsx"
+            save_results_to_excel(frame, output_path=str(output))
+            sheet = load_workbook(output, read_only=False).active
+            headers = [cell.value for cell in sheet[1]]
+            column = headers.index("By Tool P95/P50/P05 No Alarm Reasons") + 1
+            self.assertEqual(sheet.cell(2, column).value, diagnostic)
+            self.assertTrue(sheet.cell(2, column).alignment.wrap_text)
+
     def test_whole_baseline_excludes_current_tool(self):
         baseline = pd.DataFrame({"Matching": ["A"] * 10 + ["B"] * 10, "point_val": [0] * 10 + [10] * 10})
         weekly = pd.DataFrame({"Matching": ["A"] * 5 + ["B"] * 5, "point_val": [1] * 5 + [9] * 5})
@@ -183,17 +256,18 @@ class CurrentByToolRuleTests(unittest.TestCase):
         self.assertIn("k_threshold", inspect.signature(kshift_sigma_ratio_calculator).parameters)
         self.assertIn("rule_profile", inspect.signature(kshift_sigma_ratio_calculator).parameters)
 
-    def test_current_default_profile_keeps_legacy_characteristic_rules(self):
+    def test_current_default_profile_uses_dual_tail_gates_for_p95_and_p05(self):
         profile = default_by_tool_percentile_profile()
         nominal = profile["characteristics"]["Nominal"]
         bigger = profile["characteristics"]["Bigger"]
         smaller = profile["characteristics"]["Smaller"]
 
         self.assertEqual((nominal["P50"]["own_low"], nominal["P50"]["own_high"]), (25, 75))
-        self.assertEqual((bigger["P95"]["own_low"], bigger["P95"]["peer_high"]), (5, 95))
-        self.assertFalse(bigger["P05"]["own_enabled"])
-        self.assertFalse(smaller["P95"]["own_enabled"])
-        self.assertEqual(smaller["P05"]["own_high"], 95)
+        for rules in (nominal, bigger, smaller):
+            for slot in ("P95", "P05"):
+                self.assertTrue(rules[slot]["own_enabled"])
+                self.assertEqual((rules[slot]["own_low"], rules[slot]["own_high"]), (5, 95))
+                self.assertEqual((rules[slot]["peer_low"], rules[slot]["peer_high"]), (5, 95))
         self.assertEqual(characteristic_profile(profile, "Sigma"), smaller)
 
     def test_invalid_or_future_profile_resets_to_current_default(self):
@@ -240,39 +314,48 @@ class CurrentByToolRuleTests(unittest.TestCase):
 
         self.assertEqual(highlights["P50_shift"], "HIGHLIGHT")
 
-    def test_current_default_review_matches_legacy_rules(self):
-        from oob_module_NGK_nostatic import (
-            _legacy_review_kshift_results,
-            review_kshift_results,
-        )
+    def test_p95_and_p05_each_alarm_outside_either_baseline_tail(self):
+        from oob_module_NGK_nostatic import review_kshift_results
 
         baseline = {
             "P05": 5.0, "P25": 25.0, "P50": 50.0, "P75": 75.0, "P95": 95.0,
             "Q5": 5.0, "Q25": 25.0, "Q50": 50.0, "Q75": 75.0, "Q95": 95.0,
         }
-        scenarios = (
-            ("Nominal", {"P05": 0.0, "P50": 90.0, "P95": 100.0}, (-3.0, 3.0, -3.0)),
-            ("Bigger", {"P05": 0.0, "P50": 10.0, "P95": 0.0}, (-3.0, -3.0, -3.0)),
-            ("Smaller", {"P05": 100.0, "P50": 90.0, "P95": 100.0}, (3.0, 3.0, 3.0)),
-            ("Sigma", {"P05": 100.0, "P50": 90.0, "P95": 100.0}, (3.0, 3.0, 3.0)),
-        )
-        for characteristic, weekly, signed_values in scenarios:
+        scenarios = (("P95", 100.0, 3.0), ("P95", 0.0, -3.0),
+                     ("P05", 100.0, 3.0), ("P05", 0.0, -3.0))
+        for target_slot, target_value, signed_value in scenarios:
+            weekly = {"P05": 50.0, "P50": 50.0, "P95": 50.0}
+            weekly[target_slot] = target_value
             weekly_with_q = dict(weekly)
             weekly_with_q.update({f"Q{int(key[1:])}": value for key, value in weekly.items()})
             results = {}
-            for slot, signed in zip(("P95", "P50", "P05"), signed_values):
+            for slot in ("P95", "P50", "P05"):
+                signed = signed_value if slot == target_slot else 0.0
                 results[f"{slot}_k"] = abs(signed)
                 results[f"{slot}_k_ori"] = signed
-            with self.subTest(characteristic=characteristic):
-                legacy = _legacy_review_kshift_results(
-                    results, 0.01, characteristic, weekly_with_q, baseline, k_threshold=2.0
-                )
+            with self.subTest(slot=target_slot, value=target_value):
                 configured = review_kshift_results(
-                    results, 0.01, characteristic, weekly_with_q, baseline,
+                    results, 0.01, "Nominal", weekly_with_q, baseline,
                     k_threshold=2.0,
-                    rule_profile=characteristic_profile(None, characteristic),
+                    rule_profile=characteristic_profile(None, "Nominal"),
                 )
-                self.assertEqual(configured, legacy)
+                self.assertEqual(configured[f"{target_slot}_shift"], "HIGHLIGHT")
+
+    def test_peer_gate_for_p95_and_p05_follows_signed_direction(self):
+        profile = characteristic_profile(None, "Nominal")
+        bounds = {"P95": 2.0, "P05": -2.0}
+        for slot, signed, weekly_value in (("P95", -3.0, -3.0), ("P05", 3.0, 3.0)):
+            result = result_for(k=0, rules=())
+            result[f"{slot}_shift"] = "HIGHLIGHT"
+            result[f"{slot}_k"] = 3.0
+            result[f"{slot}_k_ori"] = signed
+            weekly = {"P95": 0.0, "P50": 0.0, "P05": 0.0}
+            weekly[slot] = weekly_value
+            final, _, _ = apply_whole_baseline_exemption(
+                result, weekly, bounds, profile, k_threshold=2.0, peer_bypass_k=5.0,
+            )
+            with self.subTest(slot=slot, signed=signed):
+                self.assertEqual(final[f"{slot}_shift"], "HIGHLIGHT")
 
     def test_by_tool_plot_excludes_ineligible_tools(self):
         frame = pd.DataFrame({
@@ -357,6 +440,39 @@ class CurrentByToolRuleTests(unittest.TestCase):
         self.assertEqual(by_tool_plot_alpha({"highlight": True}, False), 0.95)
         self.assertEqual(by_tool_plot_alpha({"highlight": False}, True), 0.45)
         self.assertEqual(by_tool_plot_alpha(None, False), 0.8)
+
+
+class OneSidedKDenominatorTests(unittest.TestCase):
+    def calculate(self, characteristic, ucl, lcl, by_tool=True):
+        from oob_module_NGK_nostatic import kshift_sigma_ratio_calculator
+
+        baseline = np.linspace(0.0, 10.0, 101)
+        weekly = np.full(5, 20.0)
+        return kshift_sigma_ratio_calculator(
+            {"values": baseline}, {"values": weekly},
+            characteristic, 0.01, ucl, lcl,
+            rule_profile=characteristic_profile(None, characteristic) if by_tool else None,
+        )
+
+    def assert_all_slots_use_scale_ten(self, result):
+        self.assertAlmostEqual(result["P95_k"], 1.05)
+        self.assertAlmostEqual(result["P50_k"], 1.50)
+        self.assertAlmostEqual(result["P05_k"], 1.95)
+
+    def test_bigger_uses_lcl_scale_for_all_denominators(self):
+        # Baseline P50=5 and LCL=-55, so the common scale is (5-(-55))/6=10.
+        self.assert_all_slots_use_scale_ten(self.calculate("Bigger", np.nan, -55.0))
+
+    def test_smaller_uses_ucl_scale_for_all_denominators(self):
+        # Baseline P50=5 and UCL=65, so the common scale is (65-5)/6=10.
+        self.assert_all_slots_use_scale_ten(self.calculate("Smaller", 65.0, np.nan))
+
+    def test_sigma_uses_smaller_ucl_behavior(self):
+        self.assert_all_slots_use_scale_ten(self.calculate("Sigma", 65.0, np.nan))
+
+    def test_general_shift_also_uses_one_sided_denominator(self):
+        result = self.calculate("Bigger", np.nan, -55.0, by_tool=False)
+        self.assert_all_slots_use_scale_ten(result)
 
 
 if __name__ == "__main__":
