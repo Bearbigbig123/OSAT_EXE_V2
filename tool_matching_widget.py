@@ -105,16 +105,16 @@ def matching_alarm_result(mean_index, sigma_index, k_value, sigma, sigma_referen
 def matching_axis_layout(tool_count):
     """Keep Tool labels readable through at least 20 groups."""
     if tool_count <= 10:
-        return {"rotation": 0, "fontsize": 8, "figure_width": 7.0, "legend_columns": 1}
+        return {"rotation": 45, "fontsize": 8, "figure_width": 7.0, "legend_columns": 1}
     if tool_count <= 20:
         return {
-            "rotation": 55,
+            "rotation": 45,
             "fontsize": 7,
             "figure_width": max(8.0, 5.0 + 0.35 * tool_count),
             "legend_columns": 2,
         }
     return {
-        "rotation": 65,
+        "rotation": 45,
         "fontsize": 6.5,
         "figure_width": min(14.0, 6.0 + 0.3 * tool_count),
         "legend_columns": 3,
@@ -1054,11 +1054,6 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 style = styles[str(mg)]
                 is_alarm = str(mg) in alarm_groups
                 alpha = 0.95 if is_alarm else 0.45
-                if is_alarm:
-                    scatter_ax.axvspan(
-                        x_position - 0.5, x_position + len(group_data) - 0.5,
-                        color="#FFF4CC", alpha=0.8, zorder=0,
-                    )
                 scatter_ax.scatter(
                     x_vals, y_vals, color=style["color"], marker=style["marker"],
                     alpha=alpha, s=42, label=f'{mg}', zorder=3,
@@ -1086,7 +1081,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             scatter_ax.set_xticklabels(
                 labels,
                 rotation=axis_layout["rotation"],
-                ha='right' if axis_layout["rotation"] else 'center',
+                ha='right',
                 fontsize=axis_layout["fontsize"],
             )
             scatter_ax.tick_params(axis='x', which='minor', bottom=True, top=False)
@@ -1101,13 +1096,11 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         # 2. 盒鬚圖
         box_fig, box_ax = plt.subplots(figsize=figure_size)
         if box_data:
-            bp = box_ax.boxplot(box_data, labels=labels, patch_artist=True, widths=0.6)
+            bp = box_ax.boxplot(box_data, tick_labels=labels, patch_artist=True, widths=0.6)
             for i, (patch, mg) in enumerate(zip(bp['boxes'], unique_groups)):
                 style = styles[str(mg)]
                 is_alarm = str(mg) in alarm_groups
                 alpha = 0.95 if is_alarm else 0.45
-                if is_alarm:
-                    box_ax.axvspan(i + 0.5, i + 1.5, color="#FFF4CC", alpha=0.8, zorder=0)
                 patch.set_facecolor(style["color"])
                 patch.set_edgecolor(style["color"])
                 patch.set_alpha(alpha)
@@ -1140,7 +1133,7 @@ class ToolMatchingWidget(QtWidgets.QWidget):
         box_ax.set_xticklabels(
             labels,
             rotation=axis_layout["rotation"],
-            ha='right' if axis_layout["rotation"] else 'center',
+            ha='right',
             fontsize=axis_layout["fontsize"],
         )
         box_fig.tight_layout()
@@ -1455,7 +1448,6 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 import io
                 from PIL import Image
                 import matplotlib.cm as cm
-                from openpyxl.drawing.image import Image as XLImage
                 import tempfile
                 import shutil
             except ImportError as e:
@@ -1475,22 +1467,21 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             df.insert(0, "SPC_Chart", "")
             df.insert(1, "BoxPlot", "")
 
-            writer = pd.ExcelWriter(output_path, engine='openpyxl')
+            writer = pd.ExcelWriter(output_path, engine='xlsxwriter')
             df.to_excel(writer, sheet_name='Tool Matching Results', index=False)
+            workbook = writer.book
             worksheet = writer.sheets['Tool Matching Results']
 
-            header_font = openpyxl.styles.Font(bold=True, color="FFFFFF")
-            header_fill = openpyxl.styles.PatternFill(start_color="344CB7", end_color="344CB7", fill_type="solid")
-            header_alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center")
-
-            for cell in worksheet[1]:
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-
-            worksheet.column_dimensions['A'].width = 70
-            worksheet.column_dimensions['B'].width = 70
-            abnormal_fill = openpyxl.styles.PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+            header_format = workbook.add_format({
+                'bold': True, 'font_color': '#FFFFFF', 'bg_color': '#344CB7',
+                'align': 'center', 'valign': 'vcenter', 'border': 1,
+            })
+            abnormal_format = workbook.add_format({'bg_color': '#FFCCCC'})
+            for col_idx, header in enumerate(df.columns):
+                worksheet.write(0, col_idx, header, header_format)
+            worksheet.set_column(0, 1, 70)
+            worksheet.freeze_panes(1, 2)
+            worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
             img_display_width, img_display_height = 450, 250
 
             has_chart_figures = hasattr(self, 'chart_figures') and self.chart_figures
@@ -1510,7 +1501,9 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                             pass
                         return None
                 if row_data["Need_matching"]:
-                    for cell in worksheet[row_idx]: cell.fill = abnormal_fill
+                    worksheet.set_row(row_idx - 1, 190, abnormal_format)
+                else:
+                    worksheet.set_row(row_idx - 1, 190)
 
                 try:
                     group_name, chart_name = str(row_data["GroupName"]), str(row_data["ChartName"])
@@ -1538,29 +1531,39 @@ class ToolMatchingWidget(QtWidgets.QWidget):
 
                         try:
                             if os.path.exists(spc_path):
-                                img1 = XLImage(spc_path)
-                                img1.width, img1.height = img_display_width, img_display_height
-                                worksheet.add_image(img1, f"A{row_idx}")
-                        except Exception: worksheet.cell(row=row_idx, column=1).value = "Error"
+                                with Image.open(spc_path) as source_image:
+                                    source_width, source_height = source_image.size
+                                worksheet.insert_image(row_idx - 1, 0, spc_path, {
+                                    'x_scale': img_display_width / source_width,
+                                    'y_scale': img_display_height / source_height,
+                                    'x_offset': 2, 'y_offset': 2,
+                                    # Position 4 makes images hide with filtered/hidden rows.
+                                    'object_position': 4,
+                                })
+                        except Exception:
+                            worksheet.write(row_idx - 1, 0, "Error")
                         
                         try:
                             if os.path.exists(box_path):
-                                img2 = XLImage(box_path)
-                                img2.width, img2.height = img_display_width, img_display_height
-                                worksheet.add_image(img2, f"B{row_idx}")
-                        except Exception: worksheet.cell(row=row_idx, column=2).value = "Error"
+                                with Image.open(box_path) as source_image:
+                                    source_width, source_height = source_image.size
+                                worksheet.insert_image(row_idx - 1, 1, box_path, {
+                                    'x_scale': img_display_width / source_width,
+                                    'y_scale': img_display_height / source_height,
+                                    'x_offset': 2, 'y_offset': 2,
+                                    'object_position': 4,
+                                })
+                        except Exception:
+                            worksheet.write(row_idx - 1, 1, "Error")
                     else:
-                        worksheet.cell(row=row_idx, column=1).value = "No Data"
-                        worksheet.cell(row=row_idx, column=2).value = "No Data"
+                        worksheet.write(row_idx - 1, 0, "No Data")
+                        worksheet.write(row_idx - 1, 1, "No Data")
                 except Exception: pass
 
-            for i in range(2, worksheet.max_row + 1):
-                worksheet.row_dimensions[i].height = 190
-                
-            for col_idx, column in enumerate(worksheet.columns, start=1):
-                if col_idx <= 2: continue
-                max_len = max([len(str(cell.value)) for cell in column if cell.value] + [0])
-                worksheet.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max_len + 4
+            for col_idx, column_name in enumerate(df.columns[2:], start=2):
+                values = df[column_name].dropna().astype(str)
+                max_len = max([len(str(column_name)), *(len(value) for value in values)] or [0])
+                worksheet.set_column(col_idx, col_idx, max_len + 4)
 
             try:
                 writer.close()

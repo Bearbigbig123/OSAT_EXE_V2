@@ -16,6 +16,47 @@ from tool_matching_widget import (
 
 
 class ToolMatchingRuleTests(unittest.TestCase):
+    def test_excel_images_use_filter_safe_move_and_size_anchors(self):
+        import tempfile
+        import zipfile
+        from pathlib import Path
+        from xml.etree import ElementTree
+        from matplotlib.figure import Figure
+        from openpyxl import load_workbook
+
+        scatter = Figure()
+        scatter.add_subplot(111).plot([0, 1], [0, 1])
+        box = Figure()
+        box.add_subplot(111).boxplot([[1, 2, 3]])
+
+        class ExportContext:
+            chart_figures = {("G", "C"): {"scatter": scatter, "box": box}}
+
+            def __init__(self, folder):
+                self.folder = Path(folder)
+
+            def _get_resource_path(self, name):
+                return str(self.folder / name)
+
+        row = {
+            "Need_matching": False, "AbnormalType": "", "GroupName": "G", "ChartName": "C",
+            "matching_group": "Tool01", "mean_matching_index": 0.1,
+            "sigma_matching_index": 0.2, "K": 1.0, "mean": 10.0, "sigma": 1.0,
+            "mean_median": 10.0, "sigma_median": 1.0, "samplesize": 10,
+            "characteristic": "Nominal",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            output = ToolMatchingWidget._export_to_excel(ExportContext(folder), [row, row])
+            workbook = load_workbook(output, read_only=False)
+            self.assertEqual(workbook["Tool Matching Results"].auto_filter.ref, "A1:P3")
+
+            with zipfile.ZipFile(output) as archive:
+                drawing = ElementTree.fromstring(archive.read("xl/drawings/drawing1.xml"))
+            namespace = {"xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"}
+            anchors = drawing.findall("xdr:twoCellAnchor", namespace)
+            self.assertEqual(len(anchors), 4)
+            self.assertTrue(all(anchor.get("editAs") is None for anchor in anchors))
+
     def test_outliers_are_removed_per_tool_not_across_tools(self):
         frame = pd.DataFrame({
             "matching_group": ["A"] * 11 + ["B"] * 10,
@@ -171,9 +212,42 @@ class ToolMatchingRuleTests(unittest.TestCase):
             (False, ""),
         )
         layout = matching_axis_layout(20)
-        self.assertGreaterEqual(layout["rotation"], 45)
+        self.assertEqual(layout["rotation"], 45)
+        self.assertEqual(matching_axis_layout(5)["rotation"], 45)
+        self.assertEqual(matching_axis_layout(30)["rotation"], 45)
         self.assertGreaterEqual(layout["figure_width"], 10.0)
         self.assertEqual(layout["legend_columns"], 2)
+
+    def test_alarm_tool_is_emphasized_without_background_shading(self):
+        class PlotContext:
+            chart_figures = {}
+            tool_matching_settings = {
+                "mean_index_enabled": False,
+                "sigma_index_enabled": False,
+            }
+
+        frame = pd.DataFrame({
+            "matching_group": ["AlarmTool"] * 5 + ["NormalTool"] * 5,
+            "point_val": [10, 11, 12, 13, 14, 10, 10.1, 9.9, 10.2, 9.8],
+            "point_time": pd.date_range("2026-01-01", periods=10),
+        })
+        results = [
+            ["G", "C", "AlarmTool", "group_all", 1.2, 1.0, 1.73, 12.0, 0.5, 10.0, 0.5, 5, "Nominal"],
+            ["G", "C", "NormalTool", "group_all", 0.2, 1.0, 1.73, 10.0, 0.5, 10.0, 0.5, 5, "Nominal"],
+        ]
+
+        context = PlotContext()
+        ToolMatchingWidget._create_boxplot_single(context, frame, "G", "C", results)
+        scatter_figure = context.chart_figures[("G", "C")]["scatter"]
+        box_figure = context.chart_figures[("G", "C")]["box"]
+        scatter_axis = scatter_figure.axes[0]
+        box_axis = box_figure.axes[0]
+
+        self.assertEqual(len(scatter_axis.patches), 0)
+        self.assertEqual(len(box_axis.patches), 2)
+        self.assertEqual([collection.get_alpha() for collection in scatter_axis.collections], [0.95, 0.45])
+        self.assertTrue(all(label.get_rotation() == 45 for label in scatter_axis.get_xticklabels()))
+        self.assertTrue(all(label.get_rotation() == 45 for label in box_axis.get_xticklabels()))
 
 
 if __name__ == "__main__":
