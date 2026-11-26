@@ -409,16 +409,17 @@ class CurrentByToolRuleTests(unittest.TestCase):
             "p50_k": 3.20,
             "k": 5.45,
         })
-        self.assertEqual(label, "Tool01 (P05=5.45σ, P50=3.20σ)")
+        self.assertEqual(label, "Tool01 (P05 K=5.45, P50 K=3.20)")
         self.assertNotIn("Max", label)
 
-    def test_legend_shows_configured_formula_without_changing_rule_id(self):
+    def test_legend_omits_long_configured_formula(self):
         label = format_by_tool_shift_label("Tool01", {
             "triggered_rules": ["P50_shift"],
             "p50_k": 3.2,
             "rule_formulas": {"P50": "W:P80 vs K-Base:P60; outside Base P20-P70"},
         })
-        self.assertIn("P50[W:P80 vs K-Base:P60; outside Base P20-P70]", label)
+        self.assertEqual(label, "Tool01 (P50 K=3.20)")
+        self.assertNotIn("K-Base", label)
 
     def test_non_alarm_diagnostic_k_does_not_show_max_label(self):
         label = format_by_tool_shift_label("Tool01", {

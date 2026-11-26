@@ -208,7 +208,7 @@ def _as_float(value: Any) -> float:
 
 
 def format_by_tool_shift_label(tool: str, tool_info: Mapping[str, Any]) -> str:
-    """Build an unambiguous legend label with a K value for each triggered rule."""
+    """Build a compact legend label with a K value for each triggered rule."""
     percentile_rank = {"P05": 0, "P50": 1, "P95": 2}
     triggered = [
         str(rule).replace("_shift", "").upper()
@@ -221,14 +221,11 @@ def format_by_tool_shift_label(tool: str, tool_info: Mapping[str, Any]) -> str:
 
     parts = []
     fallback_k = _as_float(tool_info.get("k"))
-    formulas = tool_info.get("rule_formulas", {})
     for percentile in triggered:
         k_value = _as_float(tool_info.get(f"{percentile.lower()}_k"))
         if pd.isna(k_value) and len(triggered) == 1:
             k_value = fallback_k
-        formula = formulas.get(percentile) if isinstance(formulas, Mapping) else None
-        name = f"{percentile}[{formula}]" if formula else percentile
-        parts.append(f"{name}={k_value:.2f}σ" if pd.notna(k_value) else name)
+        parts.append(f"{percentile} K={k_value:.2f}" if pd.notna(k_value) else percentile)
     return f"{tool} ({', '.join(parts)})"
 
 
