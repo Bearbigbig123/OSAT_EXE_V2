@@ -225,9 +225,6 @@ class ToolMatchingRuleTests(unittest.TestCase):
             (False, ""),
         )
         layout = matching_axis_layout(20)
-        self.assertEqual(layout["rotation"], 45)
-        self.assertEqual(matching_axis_layout(5)["rotation"], 45)
-        self.assertEqual(matching_axis_layout(30)["rotation"], 45)
         self.assertGreaterEqual(layout["figure_width"], 10.0)
         self.assertEqual(layout["legend_columns"], 2)
 
@@ -259,8 +256,8 @@ class ToolMatchingRuleTests(unittest.TestCase):
         self.assertEqual(len(scatter_axis.patches), 0)
         self.assertEqual(len(box_axis.patches), 2)
         self.assertEqual([collection.get_alpha() for collection in scatter_axis.collections], [0.95, 0.45])
-        self.assertTrue(all(label.get_rotation() == 45 for label in scatter_axis.get_xticklabels()))
-        self.assertTrue(all(label.get_rotation() == 45 for label in box_axis.get_xticklabels()))
+        self.assertFalse(any(label.get_visible() for label in scatter_axis.get_xticklabels()))
+        self.assertFalse(any(label.get_visible() for label in box_axis.get_xticklabels()))
 
 
 if __name__ == "__main__":
