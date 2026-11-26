@@ -103,15 +103,19 @@ def matching_alarm_result(mean_index, sigma_index, k_value, sigma, sigma_referen
 
 
 def matching_axis_layout(tool_count):
-    """Size matching plots and legends for the number of tools."""
+    """Keep Tool labels readable through at least 20 groups."""
     if tool_count <= 10:
-        return {"figure_width": 7.0, "legend_columns": 1}
+        return {"rotation": 45, "fontsize": 8, "figure_width": 7.0, "legend_columns": 1}
     if tool_count <= 20:
         return {
+            "rotation": 45,
+            "fontsize": 7,
             "figure_width": max(8.0, 5.0 + 0.35 * tool_count),
             "legend_columns": 2,
         }
     return {
+        "rotation": 45,
+        "fontsize": 6.5,
         "figure_width": min(14.0, 6.0 + 0.3 * tool_count),
         "legend_columns": 3,
     }
@@ -1063,7 +1067,6 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 x_position += len(group_data)
 
         scatter_ax.set_title(f"SPC Chart: {gname} - {cname}", fontsize=10)
-        scatter_ax.set_xlabel("Sample Sequence (Grouped by Matching Group)")
         scatter_ax.set_ylabel("Point Value")
         scatter_ax.grid(True, linestyle='--', alpha=0.3, zorder=0)
 
@@ -1074,7 +1077,12 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                 group_positions.append(x_pos + group_size/2 - 0.5)
                 x_pos += group_size
             scatter_ax.set_xticks(group_positions)
-            scatter_ax.tick_params(axis='x', labelbottom=False)
+            scatter_ax.set_xticklabels(
+                labels,
+                rotation=axis_layout["rotation"],
+                ha='right',
+                fontsize=axis_layout["fontsize"],
+            )
             scatter_ax.tick_params(axis='x', which='minor', bottom=True, top=False)
 
         scatter_ax.legend(
@@ -1118,10 +1126,14 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             )
 
         box_ax.set_title(f"Boxplot: {gname} - {cname}", fontsize=10)
-        box_ax.set_xlabel("Matching Group")
         box_ax.set_ylabel("Point Value")
         box_ax.grid(True, linestyle='--', alpha=0.6)
-        box_ax.tick_params(axis='x', labelbottom=False)
+        box_ax.set_xticklabels(
+            labels,
+            rotation=axis_layout["rotation"],
+            ha='right',
+            fontsize=axis_layout["fontsize"],
+        )
         box_fig.tight_layout()
 
         self.chart_figures[(gname, cname)] = {'scatter': scatter_fig, 'box': box_fig}
