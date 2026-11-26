@@ -56,6 +56,19 @@ class ToolMatchingRuleTests(unittest.TestCase):
             anchors = drawing.findall("xdr:twoCellAnchor", namespace)
             self.assertEqual(len(anchors), 4)
             self.assertTrue(all(anchor.get("editAs") is None for anchor in anchors))
+            for anchor in anchors:
+                start = anchor.find("xdr:from", namespace)
+                end = anchor.find("xdr:to", namespace)
+                self.assertEqual(
+                    start.find("xdr:row", namespace).text,
+                    end.find("xdr:row", namespace).text,
+                    "An image crossing into another row remains visible after filtering",
+                )
+                self.assertEqual(
+                    start.find("xdr:col", namespace).text,
+                    end.find("xdr:col", namespace).text,
+                    "An image crossing into another column is not cell-contained",
+                )
 
     def test_outliers_are_removed_per_tool_not_across_tools(self):
         frame = pd.DataFrame({

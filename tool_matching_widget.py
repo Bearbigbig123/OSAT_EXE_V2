@@ -1482,7 +1482,24 @@ class ToolMatchingWidget(QtWidgets.QWidget):
             worksheet.set_column(0, 1, 70)
             worksheet.freeze_panes(1, 2)
             worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
-            img_display_width, img_display_height = 450, 250
+            # Keep each image strictly inside its own cell. XlsxWriter uses the
+            # PNG DPI when calculating its Excel size, so scaling from pixel
+            # dimensions alone can make an 80-DPI chart spill into later rows.
+            # A spilled image isn't fully hidden when its data row is filtered.
+            img_display_width, img_display_height = 440, 240
+
+            def image_scale_for_excel(source_image):
+                source_width, source_height = source_image.size
+                dpi = source_image.info.get('dpi', (96, 96))
+                try:
+                    x_dpi, y_dpi = float(dpi[0]), float(dpi[1])
+                except (TypeError, ValueError, IndexError):
+                    x_dpi = y_dpi = 96.0
+                x_dpi = x_dpi if x_dpi > 0 else 96.0
+                y_dpi = y_dpi if y_dpi > 0 else 96.0
+                excel_width = source_width * 96.0 / x_dpi
+                excel_height = source_height * 96.0 / y_dpi
+                return img_display_width / excel_width, img_display_height / excel_height
 
             has_chart_figures = hasattr(self, 'chart_figures') and self.chart_figures
             
@@ -1532,12 +1549,12 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                         try:
                             if os.path.exists(spc_path):
                                 with Image.open(spc_path) as source_image:
-                                    source_width, source_height = source_image.size
+                                    x_scale, y_scale = image_scale_for_excel(source_image)
                                 worksheet.insert_image(row_idx - 1, 0, spc_path, {
-                                    'x_scale': img_display_width / source_width,
-                                    'y_scale': img_display_height / source_height,
+                                    'x_scale': x_scale,
+                                    'y_scale': y_scale,
                                     'x_offset': 2, 'y_offset': 2,
-                                    # Position 4 makes images hide with filtered/hidden rows.
+                                    # Position 4 hides cell-contained images with filtered rows.
                                     'object_position': 4,
                                 })
                         except Exception:
@@ -1546,10 +1563,10 @@ class ToolMatchingWidget(QtWidgets.QWidget):
                         try:
                             if os.path.exists(box_path):
                                 with Image.open(box_path) as source_image:
-                                    source_width, source_height = source_image.size
+                                    x_scale, y_scale = image_scale_for_excel(source_image)
                                 worksheet.insert_image(row_idx - 1, 1, box_path, {
-                                    'x_scale': img_display_width / source_width,
-                                    'y_scale': img_display_height / source_height,
+                                    'x_scale': x_scale,
+                                    'y_scale': y_scale,
                                     'x_offset': 2, 'y_offset': 2,
                                     'object_position': 4,
                                 })
